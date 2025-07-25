@@ -1,0 +1,40 @@
+{
+  inputs = {
+    nixpkgs.url = "nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+      in
+      {
+        formatter = pkgs.nixfmt-rfc-style;
+        devShells.default = pkgs.mkShell rec {
+          packages = with pkgs; [
+            libgcc
+            clang-tools
+          ];
+
+          buildInputs = with pkgs; [
+            raylib
+            xorg.libX11
+          ];
+
+          env = {
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
+          };
+
+          CPATH = builtins.concatStringsSep ":" [
+            (pkgs.lib.makeSearchPathOutput "dev" "include" buildInputs)
+          ];
+        };
+      }
+    );
+}
