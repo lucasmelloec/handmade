@@ -1,74 +1,90 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <sys/mman.h>
 
+struct OffscreenBuffer {
+  XImage image;
+  void *memory;
+  int memory_size;
+  int width;
+  int height;
+  int pitch;
+  int bytes_per_pixel;
+};
+
 static bool running;
-static XImage bitmap_image;
-static void *bitmap_memory;
-static int bitmap_memory_size;
-static int bytes_per_pixel = 4;
-static int bitmap_width;
-static int bitmap_height;
+static OffscreenBuffer global_backbuffer;
 
-static void render_weird_gradient(int xoffset, int yoffset) {
-  int width = bitmap_width;
-  int height = bitmap_height;
+struct WindowDimension {
+  int width;
+  int height;
+};
 
-  int pitch = width * bytes_per_pixel;
-  uint8_t *row = (uint8_t *)bitmap_memory;
+WindowDimension get_window_dimension(Display *display, Window window) {
+  XWindowAttributes window_attrs;
+  XGetWindowAttributes(display, window, &window_attrs);
+  return WindowDimension{window_attrs.width, window_attrs.height};
+}
 
-  for (int y = 0; y < height; ++y) {
+static void render_weird_gradient(OffscreenBuffer buffer, int blue_offset,
+                                  int green_offset) {
+  uint8_t *row = (uint8_t *)buffer.memory;
+
+  for (int y = 0; y < buffer.height; ++y) {
     uint32_t *pixel = (uint32_t *)row;
-    for (int x = 0; x < width; ++x) {
-      auto blue = (x + xoffset);
-      auto green = (y + yoffset);
+    for (int x = 0; x < buffer.width; ++x) {
+      auto blue = (x + blue_offset);
+      auto green = (y + green_offset);
 
       *pixel++ = ((green << 8) | blue);
     }
 
-    row += pitch;
+    row += buffer.pitch;
   }
 }
 
-static void resize_bitmap(Display *display, int screen, int width, int height) {
+static void resize_bitmap(Display *display, int screen, OffscreenBuffer &buffer,
+                          int width, int height) {
   // TODO: maybe only destroy after successfully creating another one, and if
   // failed, destroy first
-  if (bitmap_memory) {
-    munmap(bitmap_memory, bitmap_memory_size);
+  if (buffer.memory) {
+    munmap(buffer.memory, buffer.memory_size);
   }
 
-  bitmap_width = width;
-  bitmap_height = height;
+  buffer.width = width;
+  buffer.height = height;
+  buffer.bytes_per_pixel = 4;
 
-  bitmap_memory_size = width * height * bytes_per_pixel;
-  bitmap_memory = mmap(NULL, bitmap_memory_size, PROT_READ | PROT_WRITE,
+  buffer.memory_size = width * height * buffer.bytes_per_pixel;
+  buffer.memory = mmap(NULL, buffer.memory_size, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
-  bitmap_image.width = width;
-  bitmap_image.height = height;
-  bitmap_image.xoffset = 0;
-  bitmap_image.format = ZPixmap;
-  bitmap_image.data = (char *)bitmap_memory;
-  bitmap_image.byte_order = LSBFirst;
-  bitmap_image.bitmap_unit = 32;
-  bitmap_image.bitmap_bit_order = LSBFirst;
-  bitmap_image.bitmap_pad = 32;
-  bitmap_image.depth = 24;
-  bitmap_image.bytes_per_line = width * bytes_per_pixel;
-  bitmap_image.bits_per_pixel = 32;
-  bitmap_image.red_mask = 0x00FF0000;
-  bitmap_image.green_mask = 0x0000FF00;
-  bitmap_image.blue_mask = 0x000000FF;
+  buffer.pitch = width * buffer.bytes_per_pixel;
 
-  XInitImage(&bitmap_image);
+  buffer.image.width = width;
+  buffer.image.height = height;
+  buffer.image.xoffset = 0;
+  buffer.image.format = ZPixmap;
+  buffer.image.data = (char *)buffer.memory;
+  buffer.image.byte_order = LSBFirst;
+  buffer.image.bitmap_unit = 32;
+  buffer.image.bitmap_bit_order = LSBFirst;
+  buffer.image.bitmap_pad = 32;
+  buffer.image.depth = 24;
+  buffer.image.bytes_per_line = width * buffer.bytes_per_pixel;
+  buffer.image.bits_per_pixel = 32;
+  buffer.image.red_mask = 0x00FF0000;
+  buffer.image.green_mask = 0x0000FF00;
+  buffer.image.blue_mask = 0x000000FF;
+
+  XInitImage(&buffer.image);
 }
 
-static void update_window(Display *display, Window window, GC gc,
-                          int window_width, int window_height) {
-  XPutImage(display, window, gc, &bitmap_image, 0, 0, 0, 0, window_width,
+static void display_buffer_in_window(Display *display, Window window, GC gc,
+                                     OffscreenBuffer buffer, int window_width,
+                                     int window_height) {
+  XPutImage(display, window, gc, &buffer.image, 0, 0, 0, 0, window_width,
             window_height);
 }
 
@@ -89,7 +105,7 @@ int main() {
     XMapWindow(display, window);
     GC gc = XCreateGC(display, window, 0, NULL);
 
-    resize_bitmap(display, screen, 800, 600);
+    resize_bitmap(display, screen, global_backbuffer, 800, 600);
     running = true;
 
     int xoffset = 0;
@@ -100,14 +116,13 @@ int main() {
         XNextEvent(display, &event);
         switch (event.type) {
         case ConfigureNotify: {
-          resize_bitmap(display, screen, event.xconfigure.width,
-                        event.xconfigure.height);
+          resize_bitmap(display, screen, global_backbuffer,
+                        event.xconfigure.width, event.xconfigure.height);
         } break;
         case Expose: {
-          XWindowAttributes window_attrs;
-          XGetWindowAttributes(display, window, &window_attrs);
-          update_window(display, window, gc, window_attrs.width,
-                        window_attrs.height);
+          WindowDimension dimension = get_window_dimension(display, window);
+          display_buffer_in_window(display, window, gc, global_backbuffer,
+                                   dimension.width, dimension.height);
         } break;
         case ClientMessage: {
           running = false;
@@ -120,15 +135,14 @@ int main() {
         }
       }
 
-      render_weird_gradient(xoffset, yoffset);
-      {
-        XWindowAttributes window_attrs;
-        XGetWindowAttributes(display, window, &window_attrs);
-        update_window(display, window, gc, window_attrs.width,
-                      window_attrs.height);
-      }
+      render_weird_gradient(global_backbuffer, xoffset, yoffset);
+
+      WindowDimension dimension = get_window_dimension(display, window);
+      display_buffer_in_window(display, window, gc, global_backbuffer,
+                               dimension.width, dimension.height);
 
       ++xoffset;
+      yoffset += 2;
     }
   } else {
     // TODO: log
