@@ -20,11 +20,12 @@
           packages = with pkgs; [
             libgcc
             clang-tools
+            gdb
           ];
 
           buildInputs = with pkgs; [
-            raylib
             xorg.libX11
+            xorg.xorgproto
           ];
 
           env = {
