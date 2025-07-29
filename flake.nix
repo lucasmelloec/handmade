@@ -26,6 +26,7 @@
           buildInputs = with pkgs; [
             xorg.libX11
             xorg.xorgproto
+            libevdev
           ];
 
           env = {

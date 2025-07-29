@@ -2,6 +2,6 @@
 
 mkdir -p build
 cd build/
-g++ ../src/handmade.cpp -o handmade -g -lX11 && \
+g++ ../src/handmade.cpp -o handmade -g -lX11 -levdev && \
 cd ../ && \
 ./build/handmade

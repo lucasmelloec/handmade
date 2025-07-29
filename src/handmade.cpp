@@ -1,7 +1,14 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
+#include <libevdev-1.0/libevdev/libevdev.h>
+#include <linux/input.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 struct OffscreenBuffer {
   XImage image;
@@ -106,8 +113,41 @@ int main() {
     GC gc = XCreateGC(display, window, 0, NULL);
 
     resize_bitmap(display, screen, global_backbuffer, 800, 600);
-    running = true;
 
+    libevdev *controller_evdev = NULL;
+    int controller_found = -1;
+
+    {
+      const char *evdev_path = "/dev/input/by-id";
+      const char *joystick_suffix = "event-joystick";
+      char joystick_filename[128];
+      DIR *dir = opendir(evdev_path);
+      if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+          const char *filename = entry->d_name;
+          size_t filename_len = strlen(filename);
+          size_t suffix_len = strlen(joystick_suffix);
+
+          if (filename_len >= suffix_len &&
+              strcmp(filename + filename_len - suffix_len, joystick_suffix) ==
+                  0) {
+            snprintf(joystick_filename, sizeof(joystick_filename), "%s/%s",
+                     evdev_path, filename);
+            // TODO: Log if the controller was found
+            fprintf(stdout, "Controller found at %s\n", joystick_filename);
+            break;
+          }
+        }
+        closedir(dir);
+
+        int controller_fd = open(joystick_filename, O_RDONLY | O_NONBLOCK);
+        controller_found =
+            libevdev_new_from_fd(controller_fd, &controller_evdev);
+      }
+    }
+
+    running = true;
     int xoffset = 0;
     int yoffset = 0;
     while (running) {
@@ -135,6 +175,42 @@ int main() {
         }
       }
 
+      if (controller_found >= 0) {
+        input_event input_event;
+        // TODO: Maybe use (rc == 1 || rc == 0 || rc == -EAGAIN) and check
+        // if(rc == o) before using the event
+        while (libevdev_next_event(controller_evdev, LIBEVDEV_READ_FLAG_NORMAL,
+                                   &input_event) == 0) {
+          if (input_event.type == EV_KEY) {
+            bool square =
+                (input_event.code == BTN_WEST && input_event.value == 1);
+            bool circle =
+                (input_event.code == BTN_EAST && input_event.value == 1);
+            bool triangle =
+                (input_event.code == BTN_NORTH && input_event.value == 1);
+            bool cross =
+                (input_event.code == BTN_SOUTH && input_event.value == 1);
+            bool left_shoulder =
+                (input_event.code == BTN_TL && input_event.value == 1);
+            bool right_shoulder =
+                (input_event.code == BTN_TR && input_event.value == 1);
+            bool start =
+                (input_event.code == BTN_START && input_event.value == 1);
+            bool select =
+                (input_event.code == BTN_SELECT && input_event.value == 1);
+          } else if (input_event.type == EV_ABS) {
+            switch (input_event.code) {
+            case ABS_X: {
+              int8_t stick_x = input_event.value - 128;
+            } break;
+            case ABS_Y: {
+              int8_t stick_y = input_event.value - 128;
+            } break;
+            }
+          }
+        }
+      }
+
       render_weird_gradient(global_backbuffer, xoffset, yoffset);
 
       WindowDimension dimension = get_window_dimension(display, window);
@@ -147,6 +223,5 @@ int main() {
   } else {
     // TODO: log
   }
-
   return 0;
 }
