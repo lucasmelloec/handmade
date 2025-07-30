@@ -102,7 +102,9 @@ int main() {
     Window window = XCreateSimpleWindow(
         display, RootWindow(display, screen), 0, 0, 800, 600, 1,
         BlackPixel(display, screen), WhitePixel(display, screen));
-    XSelectInput(display, window, ExposureMask | StructureNotifyMask);
+    XSelectInput(display, window,
+                 ExposureMask | StructureNotifyMask | KeyPressMask |
+                     KeyReleaseMask);
 
     {
       Atom wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", False);
@@ -169,6 +171,49 @@ int main() {
         } break;
         case DestroyNotify: {
           running = false;
+        } break;
+        case KeyPress:
+        case KeyRelease: {
+          bool just_released = event.xkey.type == KeyRelease;
+          bool is_down = event.xkey.type == KeyPress;
+          if (event.xkey.type == KeyRelease && XPending(display)) {
+            XEvent next_event;
+            XPeekEvent(display, &next_event);
+            if (next_event.xkey.type == KeyPress &&
+                next_event.xkey.time == event.xkey.time &&
+                next_event.xkey.keycode == event.xkey.keycode) {
+              XNextEvent(display, &next_event);
+              is_down = true;
+            }
+          }
+          if (is_down != just_released) {
+            switch (XLookupKeysym(&event.xkey, 0)) {
+            case 'w': {
+              fprintf(stdout, "W\n");
+            } break;
+            case 'a': {
+              fprintf(stdout, "A\n");
+            } break;
+            case 's': {
+              fprintf(stdout, "S\n");
+            } break;
+            case 'd': {
+              fprintf(stdout, "D\n");
+            } break;
+            case 'q': {
+              fprintf(stdout, "Q\n");
+            } break;
+            case 'e': {
+              fprintf(stdout, "E\n");
+            } break;
+            case XK_Escape: {
+              fprintf(stdout, "Escape\n");
+            } break;
+            case XK_space: {
+              fprintf(stdout, "Space\n");
+            } break;
+            }
+          }
         } break;
         default:
           break;
