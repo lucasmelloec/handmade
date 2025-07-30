@@ -6,9 +6,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <libevdev-1.0/libevdev/libevdev.h>
-#include <linux/input.h>
 #include <sys/mman.h>
-#include <unistd.h>
 
 struct OffscreenBuffer {
   XImage image;
@@ -30,8 +28,12 @@ struct WindowDimension {
 
 WindowDimension get_window_dimension(Display *display, Window window) {
   XWindowAttributes window_attrs;
-  XGetWindowAttributes(display, window, &window_attrs);
-  return WindowDimension{window_attrs.width, window_attrs.height};
+  if (XGetWindowAttributes(display, window, &window_attrs) != 0) {
+    return WindowDimension{window_attrs.width, window_attrs.height};
+  } else {
+    // TODO: Log error
+    return WindowDimension{};
+  }
 }
 
 static void render_weird_gradient(OffscreenBuffer buffer, int blue_offset,
@@ -85,7 +87,9 @@ static void resize_bitmap(Display *display, int screen, OffscreenBuffer &buffer,
   buffer.image.green_mask = 0x0000FF00;
   buffer.image.blue_mask = 0x000000FF;
 
-  XInitImage(&buffer.image);
+  if (XInitImage(&buffer.image) == 0) {
+    // TODO: Log error and maybe do something about it
+  }
 }
 
 static void display_buffer_in_window(Display *display, Window window, GC gc,
@@ -102,16 +106,26 @@ int main() {
     Window window = XCreateSimpleWindow(
         display, RootWindow(display, screen), 0, 0, 800, 600, 1,
         BlackPixel(display, screen), WhitePixel(display, screen));
-    XSelectInput(display, window,
-                 ExposureMask | StructureNotifyMask | KeyPressMask |
-                     KeyReleaseMask);
+    if (XSelectInput(display, window,
+                     ExposureMask | StructureNotifyMask | KeyPressMask |
+                         KeyReleaseMask) == 0) {
+      // TODO: Log error
+      // TODO: Handle error nicely
+      return 1;
+    }
 
     {
       Atom wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", False);
-      XSetWMProtocols(display, window, &wm_delete, 1);
+      if (XSetWMProtocols(display, window, &wm_delete, 1) == 0) {
+        // TODO: Log error
+      }
     }
 
-    XMapWindow(display, window);
+    if (XMapWindow(display, window) == 0) {
+      // TODO: Log error
+      // TODO: Handle error nicely
+      return 1;
+    }
     GC gc = XCreateGC(display, window, 0, NULL);
 
     resize_bitmap(display, screen, global_backbuffer, 800, 600);
