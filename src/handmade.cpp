@@ -1,5 +1,6 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <alsa/asoundlib.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -25,6 +26,41 @@ struct WindowDimension {
   int width;
   int height;
 };
+
+void init_alsa(uint32_t samples_per_second, size_t buffer_size) {
+  const char *PCM_DEVICE = "default";
+  const int channels = 2;
+
+  snd_pcm_t *pcm_handle;
+  snd_pcm_hw_params_t *hw_params;
+  snd_pcm_uframes_t frames;
+  // uint rate = 44100;
+
+  if (snd_pcm_open(&pcm_handle, PCM_DEVICE, SND_PCM_STREAM_PLAYBACK, 0) >= 0) {
+    snd_pcm_hw_params_alloca(&hw_params);
+    snd_pcm_hw_params_any(pcm_handle, hw_params);
+
+    snd_pcm_hw_params_set_access(pcm_handle, hw_params,
+                                 SND_PCM_ACCESS_RW_INTERLEAVED);
+    snd_pcm_hw_params_set_format(pcm_handle, hw_params, SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(pcm_handle, hw_params, channels);
+    snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &samples_per_second,
+                                    0);
+
+    if (snd_pcm_hw_params(pcm_handle, hw_params) >= 0) {
+      printf("ALSA initialized successfully\n");
+
+      void *buff = mmap(NULL, buffer_size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+      //TODO: Play buffer here
+
+      snd_pcm_drain(pcm_handle);
+      snd_pcm_close(pcm_handle);
+      munmap(buff, buffer_size);
+    }
+  }
+}
 
 WindowDimension get_window_dimension(Display *display, Window window) {
   XWindowAttributes window_attrs;
@@ -136,7 +172,7 @@ int main() {
     {
       const char *evdev_path = "/dev/input/by-id";
       const char *joystick_suffix = "event-joystick";
-      char joystick_filename[128];
+      char joystick_filename[273];
       DIR *dir = opendir(evdev_path);
       if (dir) {
         struct dirent *entry;
@@ -162,6 +198,8 @@ int main() {
             libevdev_new_from_fd(controller_fd, &controller_evdev);
       }
     }
+
+    init_alsa(48000, 48000 * sizeof(int16_t) * 2);
 
     running = true;
     int xoffset = 0;
