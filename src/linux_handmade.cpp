@@ -1,5 +1,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <alsa/asoundlib.h>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -18,13 +20,44 @@ struct OffscreenBuffer {
   int bytes_per_pixel;
 };
 
-static bool running;
-static OffscreenBuffer global_backbuffer;
-
 struct WindowDimension {
   int width;
   int height;
 };
+
+static bool running;
+static OffscreenBuffer global_backbuffer;
+static void *global_sound_buffer;
+static snd_pcm_t *pcm_handle;
+static snd_pcm_uframes_t sound_frame_count;
+
+void init_alsa(uint32_t samples_per_second, size_t buffer_size) {
+  const char *PCM_DEVICE = "default";
+  const uint32_t CHANNELS = 2;
+
+  snd_pcm_hw_params_t *hw_params;
+
+  if (snd_pcm_open(&pcm_handle, PCM_DEVICE, SND_PCM_STREAM_PLAYBACK, 0) >= 0) {
+    snd_pcm_hw_params_alloca(&hw_params);
+    snd_pcm_hw_params_any(pcm_handle, hw_params);
+
+    snd_pcm_hw_params_set_access(pcm_handle, hw_params,
+                                 SND_PCM_ACCESS_RW_INTERLEAVED);
+    snd_pcm_hw_params_set_format(pcm_handle, hw_params, SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(pcm_handle, hw_params, CHANNELS);
+    snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &samples_per_second,
+                                    0);
+
+    sound_frame_count = buffer_size / (CHANNELS * sizeof(int16_t));
+    snd_pcm_hw_params_set_period_size_near(pcm_handle, hw_params,
+                                           &sound_frame_count, 0);
+
+    if (snd_pcm_hw_params(pcm_handle, hw_params) >= 0) {
+      global_sound_buffer = mmap(NULL, buffer_size, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    }
+  }
+}
 
 WindowDimension get_window_dimension(Display *display, Window window) {
   XWindowAttributes window_attrs;
@@ -136,7 +169,7 @@ int main() {
     {
       const char *evdev_path = "/dev/input/by-id";
       const char *joystick_suffix = "event-joystick";
-      char joystick_filename[128];
+      char joystick_filename[273];
       DIR *dir = opendir(evdev_path);
       if (dir) {
         struct dirent *entry;
@@ -163,9 +196,17 @@ int main() {
       }
     }
 
-    running = true;
     int xoffset = 0;
     int yoffset = 0;
+    const int samples_per_second = 48000;
+    const int tone_hz = 261;
+    const int16_t tone_volume = 4000;
+    int square_wave_period = samples_per_second / tone_hz;
+    int half_square_wave_period = square_wave_period / 2;
+
+    init_alsa(samples_per_second, samples_per_second * sizeof(int16_t) * 2);
+
+    running = true;
     while (running) {
       while (XPending(display)) {
         XEvent event;
@@ -272,6 +313,22 @@ int main() {
 
       render_weird_gradient(global_backbuffer, xoffset, yoffset);
 
+      if (pcm_handle && global_sound_buffer) {
+        int16_t *sample_out = (int16_t *)global_sound_buffer;
+        snd_pcm_sframes_t available_frames = snd_pcm_avail_update(pcm_handle);
+        snd_pcm_sframes_t frames_to_write = available_frames < sound_frame_count
+                                                ? available_frames
+                                                : sound_frame_count;
+        for (auto i = 0; i < frames_to_write; ++i) {
+          int16_t sample_value =
+              (i % square_wave_period) < half_square_wave_period ? tone_hz
+                                                                 : -tone_hz;
+          *sample_out++ = sample_value;
+          *sample_out++ = sample_value;
+        }
+        snd_pcm_writei(pcm_handle, global_sound_buffer, frames_to_write);
+      }
+
       WindowDimension dimension = get_window_dimension(display, window);
       display_buffer_in_window(display, window, gc, global_backbuffer,
                                dimension.width, dimension.height);
@@ -282,5 +339,6 @@ int main() {
   } else {
     // TODO: log
   }
+
   return 0;
 }

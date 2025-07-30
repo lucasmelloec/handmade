@@ -18,7 +18,7 @@
         formatter = pkgs.nixfmt-rfc-style;
         devShells.default = pkgs.mkShell rec {
           packages = with pkgs; [
-            libgcc
+            gcc
             clang-tools
             gdb
           ];
@@ -27,16 +27,19 @@
             xorg.libX11
             xorg.xorgproto
             libevdev
+            alsa-lib
           ];
 
           env = {
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
-          };
 
-          CPATH = builtins.concatStringsSep ":" [
-            (pkgs.lib.makeSearchPathOutput "dev" "include" buildInputs)
-            "${pkgs.libevdev}/include/libevdev-1.0"
-          ];
+            CPATH = builtins.concatStringsSep ":" [
+              (pkgs.lib.makeSearchPathOutput "dev" "include" buildInputs)
+              "${pkgs.libevdev}/include/libevdev-1.0"
+            ];
+
+            NIX_HARDENING_ENABLE = "";
+          };
         };
       }
     );
