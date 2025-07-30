@@ -1,5 +1,6 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <alsa/asoundlib.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -25,6 +26,54 @@ struct WindowDimension {
   int width;
   int height;
 };
+
+void init_alsa(uint32_t sample_rate, uint32_t seconds_to_play, int fd) {
+  const char *PCM_DEVICE = "default";
+  const int channels = 2;
+
+  snd_pcm_t *pcm_handle;
+  snd_pcm_hw_params_t *hw_params;
+  snd_pcm_uframes_t frames;
+  // uint rate = 44100;
+
+  if (snd_pcm_open(&pcm_handle, PCM_DEVICE, SND_PCM_STREAM_PLAYBACK, 0) >= 0) {
+    snd_pcm_hw_params_alloca(&hw_params);
+    snd_pcm_hw_params_any(pcm_handle, hw_params);
+
+    snd_pcm_hw_params_set_access(pcm_handle, hw_params,
+                                 SND_PCM_ACCESS_RW_INTERLEAVED);
+    snd_pcm_hw_params_set_format(pcm_handle, hw_params, SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(pcm_handle, hw_params, channels);
+    snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &sample_rate, 0);
+
+    if (snd_pcm_hw_params(pcm_handle, hw_params) >= 0) {
+      printf("ALSA initialized successfully\n");
+
+      // Allocate buffer to hold single period
+      snd_pcm_hw_params_get_period_size(hw_params, &frames, 0);
+      int buff_size = frames * channels * 2; // 2 -> sample size
+      void *buff = mmap(NULL, buff_size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+      unsigned int period;
+      snd_pcm_hw_params_get_period_time(hw_params, &period, NULL);
+
+      for (int loops = (seconds_to_play * 1000000) / period; loops > 0;
+           loops--) {
+        if (unsigned int pcm = read(fd, buff, buff_size) > 0) {
+          if (unsigned int pcm =
+                  snd_pcm_writei(pcm_handle, buff, frames) == -EPIPE) {
+            snd_pcm_prepare(pcm_handle);
+          }
+        }
+      }
+
+      snd_pcm_drain(pcm_handle);
+      snd_pcm_close(pcm_handle);
+      munmap(buff, buff_size);
+    }
+  }
+}
 
 WindowDimension get_window_dimension(Display *display, Window window) {
   XWindowAttributes window_attrs;

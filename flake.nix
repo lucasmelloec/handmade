@@ -27,6 +27,7 @@
             xorg.libX11
             xorg.xorgproto
             libevdev
+            alsa-lib
           ];
 
           env = {
