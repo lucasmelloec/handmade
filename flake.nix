@@ -35,6 +35,7 @@
 
           CPATH = builtins.concatStringsSep ":" [
             (pkgs.lib.makeSearchPathOutput "dev" "include" buildInputs)
+            "${pkgs.libevdev}/include/libevdev-1.0"
           ];
         };
       }

@@ -5,7 +5,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <libevdev-1.0/libevdev/libevdev.h>
+#include <libevdev/libevdev.h>
 #include <sys/mman.h>
 
 struct OffscreenBuffer {
