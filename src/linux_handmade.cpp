@@ -1,13 +1,13 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <alsa/asoundlib.h>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <dirent.h>
-#include <fcntl.h>
 #include <libevdev/libevdev.h>
+#include <math.h>
 #include <sys/mman.h>
 
 struct OffscreenBuffer {
@@ -21,8 +21,15 @@ struct OffscreenBuffer {
 };
 
 struct WindowDimension {
-  int width;
-  int height;
+  const int width;
+  const int height;
+};
+
+struct SoundOutput {
+  const int samples_per_second;
+  const int frequency;
+  const int16_t amplitude;
+  uint32_t running_sample_index = 0;
 };
 
 static bool running;
@@ -31,7 +38,7 @@ static void *global_sound_buffer;
 static snd_pcm_t *pcm_handle;
 static snd_pcm_uframes_t sound_frame_count;
 
-void init_alsa(uint32_t samples_per_second, size_t buffer_size) {
+void init_alsa(uint32_t samples_per_second) {
   const char *PCM_DEVICE = "default";
   const uint32_t CHANNELS = 2;
 
@@ -48,13 +55,11 @@ void init_alsa(uint32_t samples_per_second, size_t buffer_size) {
     snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &samples_per_second,
                                     0);
 
-    sound_frame_count = buffer_size / (CHANNELS * sizeof(int16_t));
-    snd_pcm_hw_params_set_period_size_near(pcm_handle, hw_params,
-                                           &sound_frame_count, 0);
-
     if (snd_pcm_hw_params(pcm_handle, hw_params) >= 0) {
-      global_sound_buffer = mmap(NULL, buffer_size, PROT_READ | PROT_WRITE,
-                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      snd_pcm_hw_params_get_period_size(hw_params, &sound_frame_count, 0);
+      global_sound_buffer =
+          mmap(NULL, sound_frame_count * CHANNELS * sizeof(int16_t),
+               PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     }
   }
 }
@@ -132,11 +137,27 @@ static void display_buffer_in_window(Display *display, Window window, GC gc,
             window_height);
 }
 
+static void fill_sound_buffer(SoundOutput *sound_output) {
+  int16_t *sample_out = (int16_t *)global_sound_buffer;
+
+  for (snd_pcm_uframes_t i = 0; i < sound_frame_count; ++i) {
+    float t =
+        (float)(sound_output->running_sample_index * sound_frame_count + i) /
+        (float)sound_output->samples_per_second;
+    float sine_value = sinf(2.0f * M_PI * sound_output->frequency * t);
+
+    int16_t sample_value = (int16_t)(sine_value * sound_output->amplitude);
+    *sample_out++ = sample_value;
+    *sample_out++ = sample_value;
+  }
+  ++sound_output->running_sample_index;
+}
+
 int main() {
-  Display *display = XOpenDisplay(NULL);
+  Display *const display = XOpenDisplay(NULL);
   if (display) {
-    int screen = DefaultScreen(display);
-    Window window = XCreateSimpleWindow(
+    const int screen = DefaultScreen(display);
+    const Window window = XCreateSimpleWindow(
         display, RootWindow(display, screen), 0, 0, 800, 600, 1,
         BlackPixel(display, screen), WhitePixel(display, screen));
     if (XSelectInput(display, window,
@@ -159,24 +180,24 @@ int main() {
       // TODO: Handle error nicely
       return 1;
     }
-    GC gc = XCreateGC(display, window, 0, NULL);
+    const GC gc = XCreateGC(display, window, 0, NULL);
 
     resize_bitmap(display, screen, global_backbuffer, 800, 600);
 
-    libevdev *controller_evdev = NULL;
+    libevdev * controller_evdev = NULL;
     int controller_found = -1;
 
     {
       const char *evdev_path = "/dev/input/by-id";
       const char *joystick_suffix = "event-joystick";
       char joystick_filename[273];
-      DIR *dir = opendir(evdev_path);
+      DIR *const dir = opendir(evdev_path);
       if (dir) {
-        struct dirent *entry;
+        const struct dirent *entry;
         while ((entry = readdir(dir)) != NULL) {
           const char *filename = entry->d_name;
-          size_t filename_len = strlen(filename);
-          size_t suffix_len = strlen(joystick_suffix);
+          const size_t filename_len = strlen(filename);
+          const size_t suffix_len = strlen(joystick_suffix);
 
           if (filename_len >= suffix_len &&
               strcmp(filename + filename_len - suffix_len, joystick_suffix) ==
@@ -190,7 +211,7 @@ int main() {
         }
         closedir(dir);
 
-        int controller_fd = open(joystick_filename, O_RDONLY | O_NONBLOCK);
+        const int controller_fd = open(joystick_filename, O_RDONLY | O_NONBLOCK);
         controller_found =
             libevdev_new_from_fd(controller_fd, &controller_evdev);
       }
@@ -198,13 +219,14 @@ int main() {
 
     int xoffset = 0;
     int yoffset = 0;
-    const int samples_per_second = 48000;
-    const int tone_hz = 261;
-    const int16_t tone_volume = 4000;
-    int square_wave_period = samples_per_second / tone_hz;
-    int half_square_wave_period = square_wave_period / 2;
 
-    init_alsa(samples_per_second, samples_per_second * sizeof(int16_t) * 2);
+    SoundOutput sound_output{
+        48000,
+        261,
+        6000,
+    };
+
+    init_alsa(sound_output.samples_per_second);
 
     running = true;
     while (running) {
@@ -217,7 +239,7 @@ int main() {
                         event.xconfigure.width, event.xconfigure.height);
         } break;
         case Expose: {
-          WindowDimension dimension = get_window_dimension(display, window);
+          const WindowDimension dimension = get_window_dimension(display, window);
           display_buffer_in_window(display, window, gc, global_backbuffer,
                                    dimension.width, dimension.height);
         } break;
@@ -229,7 +251,7 @@ int main() {
         } break;
         case KeyPress:
         case KeyRelease: {
-          bool just_released = event.xkey.type == KeyRelease;
+          const bool just_released = event.xkey.type == KeyRelease;
           bool is_down = event.xkey.type == KeyPress;
           if (event.xkey.type == KeyRelease && XPending(display)) {
             XEvent next_event;
@@ -282,29 +304,29 @@ int main() {
         while (libevdev_next_event(controller_evdev, LIBEVDEV_READ_FLAG_NORMAL,
                                    &input_event) == 0) {
           if (input_event.type == EV_KEY) {
-            bool square =
+            const bool square =
                 (input_event.code == BTN_WEST && input_event.value == 1);
-            bool circle =
+            const bool circle =
                 (input_event.code == BTN_EAST && input_event.value == 1);
-            bool triangle =
+            const bool triangle =
                 (input_event.code == BTN_NORTH && input_event.value == 1);
-            bool cross =
+            const bool cross =
                 (input_event.code == BTN_SOUTH && input_event.value == 1);
-            bool left_shoulder =
+            const bool left_shoulder =
                 (input_event.code == BTN_TL && input_event.value == 1);
-            bool right_shoulder =
+            const bool right_shoulder =
                 (input_event.code == BTN_TR && input_event.value == 1);
-            bool start =
+            const bool start =
                 (input_event.code == BTN_START && input_event.value == 1);
-            bool select =
+            const bool select =
                 (input_event.code == BTN_SELECT && input_event.value == 1);
           } else if (input_event.type == EV_ABS) {
             switch (input_event.code) {
             case ABS_X: {
-              int8_t stick_x = input_event.value - 128;
+              const int8_t stick_x = input_event.value - 128;
             } break;
             case ABS_Y: {
-              int8_t stick_y = input_event.value - 128;
+              const int8_t stick_y = input_event.value - 128;
             } break;
             }
           }
@@ -314,22 +336,14 @@ int main() {
       render_weird_gradient(global_backbuffer, xoffset, yoffset);
 
       if (pcm_handle && global_sound_buffer) {
-        int16_t *sample_out = (int16_t *)global_sound_buffer;
-        snd_pcm_sframes_t available_frames = snd_pcm_avail_update(pcm_handle);
-        snd_pcm_sframes_t frames_to_write = available_frames < sound_frame_count
-                                                ? available_frames
-                                                : sound_frame_count;
-        for (auto i = 0; i < frames_to_write; ++i) {
-          int16_t sample_value =
-              (i % square_wave_period) < half_square_wave_period ? tone_hz
-                                                                 : -tone_hz;
-          *sample_out++ = sample_value;
-          *sample_out++ = sample_value;
+        fill_sound_buffer(&sound_output);
+        if (snd_pcm_writei(pcm_handle, global_sound_buffer,
+                           sound_frame_count) == -EPIPE) {
+          snd_pcm_prepare(pcm_handle);
         }
-        snd_pcm_writei(pcm_handle, global_sound_buffer, frames_to_write);
       }
 
-      WindowDimension dimension = get_window_dimension(display, window);
+      const WindowDimension dimension = get_window_dimension(display, window);
       display_buffer_in_window(display, window, gc, global_backbuffer,
                                dimension.width, dimension.height);
 
