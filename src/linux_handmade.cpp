@@ -1,11 +1,10 @@
+#include "linux_handmade.h"
 #include "handmade.h"
 
 #include "handmade.cpp"
 
-#include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <algorithm>
-#include <alloca.h>
 #include <alsa/asoundlib.h>
 #include <cstdint>
 #include <cstdio>
@@ -17,62 +16,37 @@
 
 const uint32_t CHANNELS = 2;
 
-struct LinuxOffscreenBuffer {
-  XImage image;
-  void *memory;
-  int memory_size;
-  int width;
-  int height;
-  int pitch;
-  int bytes_per_pixel;
-};
-
-struct LinuxWindowDimension {
-  const int width;
-  const int height;
-};
-
-struct LinuxSoundBuffer {
-  snd_pcm_t *pcm_handle;
-  snd_pcm_uframes_t sound_frame_count;
-};
-
-struct LinuxSoundOutput {
-  const int samples_per_second;
-};
-
 static bool running;
-static LinuxOffscreenBuffer global_backbuffer;
-static LinuxSoundBuffer global_sound_buffer;
+static LinuxX11OffscreenBuffer global_backbuffer;
+static snd_pcm_t *pcm_handle;
 
-static void linux_init_alsa(uint32_t samples_per_second) {
+static void linux_alsa_init(uint32_t samples_per_second,
+                            uint32_t samples_per_write) {
   const char *PCM_DEVICE = "default";
 
   snd_pcm_hw_params_t *hw_params;
 
-  if (snd_pcm_open(&global_sound_buffer.pcm_handle, PCM_DEVICE,
-                   SND_PCM_STREAM_PLAYBACK, 0) >= 0) {
+  if (snd_pcm_open(&pcm_handle, PCM_DEVICE, SND_PCM_STREAM_PLAYBACK,
+                   SND_PCM_NONBLOCK) >= 0) {
     snd_pcm_hw_params_alloca(&hw_params);
-    snd_pcm_hw_params_any(global_sound_buffer.pcm_handle, hw_params);
+    snd_pcm_hw_params_any(pcm_handle, hw_params);
 
-    snd_pcm_hw_params_set_access(global_sound_buffer.pcm_handle, hw_params,
+    snd_pcm_hw_params_set_access(pcm_handle, hw_params,
                                  SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_format(global_sound_buffer.pcm_handle, hw_params,
-                                 SND_PCM_FORMAT_S16_LE);
-    snd_pcm_hw_params_set_channels(global_sound_buffer.pcm_handle, hw_params,
-                                   CHANNELS);
-    snd_pcm_hw_params_set_rate_near(global_sound_buffer.pcm_handle, hw_params,
-                                    &samples_per_second, 0);
+    snd_pcm_hw_params_set_format(pcm_handle, hw_params, SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(pcm_handle, hw_params, CHANNELS);
+    snd_pcm_hw_params_set_rate(pcm_handle, hw_params, samples_per_second, 0);
+    snd_pcm_hw_params_set_buffer_size(pcm_handle, hw_params, samples_per_write);
+    snd_pcm_hw_params_set_period_time(pcm_handle, hw_params,
+                                      samples_per_write / 2, 0);
 
-    if (snd_pcm_hw_params(global_sound_buffer.pcm_handle, hw_params) >= 0) {
-      snd_pcm_hw_params_get_period_size(
-          hw_params, &global_sound_buffer.sound_frame_count, 0);
+    if (snd_pcm_hw_params(pcm_handle, hw_params) >= 0) {
     }
   }
 }
 
-static LinuxWindowDimension linux_get_window_dimension(Display *const display,
-                                                       const Window window) {
+static LinuxWindowDimension
+linux_x11_get_window_dimension(Display *const display, const Window window) {
   XWindowAttributes window_attrs;
   if (XGetWindowAttributes(display, window, &window_attrs) != 0) {
     return LinuxWindowDimension{window_attrs.width, window_attrs.height};
@@ -82,9 +56,9 @@ static LinuxWindowDimension linux_get_window_dimension(Display *const display,
   }
 }
 
-static void linux_resize_bitmap(Display *const display, const int screen,
-                                LinuxOffscreenBuffer &buffer, const int width,
-                                const int height) {
+static void linux_x11_resize_bitmap(Display *const display, const int screen,
+                                    LinuxX11OffscreenBuffer &buffer,
+                                    const int width, const int height) {
   // TODO: maybe only destroy after successfully creating another one, and if
   // failed, destroy first
   if (buffer.memory) {
@@ -122,13 +96,43 @@ static void linux_resize_bitmap(Display *const display, const int screen,
   }
 }
 
-static void linux_display_buffer_in_window(Display *const display,
-                                           const Window window, const GC gc,
-                                           LinuxOffscreenBuffer buffer,
-                                           const int window_width,
-                                           const int window_height) {
+static void linux_x11_display_buffer_in_window(Display *const display,
+                                               const Window window, const GC gc,
+                                               LinuxX11OffscreenBuffer buffer,
+                                               const int window_width,
+                                               const int window_height) {
   XPutImage(display, window, gc, &buffer.image, 0, 0, 0, 0, window_width,
             window_height);
+}
+
+static void linux_process_evdev_digital_button(input_event *input_event,
+                                               GameButtonState *old_state,
+                                               int button_code,
+                                               GameButtonState *new_state) {
+  new_state->ended_down =
+      input_event->code == button_code && input_event->value == 1;
+  new_state->half_transition_count =
+      (old_state->ended_down != new_state->ended_down) ? 1 : 0;
+}
+
+static int32_t linux_alsa_get_samples_to_write(int32_t sample_count) {
+  snd_pcm_sframes_t delay = 0;
+  if (pcm_handle) {
+    snd_pcm_delay(pcm_handle, &delay);
+  }
+  return sample_count - delay;
+}
+
+static void linux_alsa_fill_sound_buffer(int16_t *samples,
+                                         int32_t sample_count) {
+  if (pcm_handle) {
+    int32_t result = snd_pcm_writei(pcm_handle, samples, sample_count);
+    if (result == -EAGAIN) {
+      // Just skip this frame
+    } else if (result < 0) {
+      snd_pcm_prepare(pcm_handle);
+    }
+  }
 }
 
 int main() {
@@ -160,7 +164,7 @@ int main() {
     }
     const GC gc = XCreateGC(display, window, 0, NULL);
 
-    linux_resize_bitmap(display, screen, global_backbuffer, 800, 600);
+    linux_x11_resize_bitmap(display, screen, global_backbuffer, 800, 600);
 
     libevdev *controller_evdev = NULL;
     int controller_found = -1;
@@ -197,36 +201,48 @@ int main() {
     }
 
     LinuxSoundOutput sound_output{
-        48000,
+        .samples_per_second = 48000,
+        .samples_per_write = 48000 / 15,
     };
 
-    linux_init_alsa(sound_output.samples_per_second);
+    linux_alsa_init(sound_output.samples_per_second,
+                    sound_output.samples_per_write);
 
     // TODO: Pool with the bitmap image allocation
     int16_t *samples = static_cast<int16_t *>(
-        mmap(NULL,
-             global_sound_buffer.sound_frame_count * CHANNELS * sizeof(int16_t),
+        mmap(NULL, sound_output.samples_per_write * CHANNELS * sizeof(int16_t),
              PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+
+    memset(samples, 0,
+           sound_output.samples_per_write * sizeof(int16_t) * CHANNELS);
+    linux_alsa_fill_sound_buffer(samples, sound_output.samples_per_write);
+
+    GameInput input[2] = {};
+    GameInput *new_input = &input[0];
+    GameInput *old_input = &input[1];
 
     running = true;
 
     timespec last_counter;
     clock_gettime(CLOCK_MONOTONIC_RAW, &last_counter);
     int64_t last_cycle_count = __rdtsc();
+
     while (running) {
       while (XPending(display)) {
         XEvent event;
         XNextEvent(display, &event);
         switch (event.type) {
         case ConfigureNotify: {
-          linux_resize_bitmap(display, screen, global_backbuffer,
-                              event.xconfigure.width, event.xconfigure.height);
+          linux_x11_resize_bitmap(display, screen, global_backbuffer,
+                                  event.xconfigure.width,
+                                  event.xconfigure.height);
         } break;
         case Expose: {
           const LinuxWindowDimension dimension =
-              linux_get_window_dimension(display, window);
-          linux_display_buffer_in_window(display, window, gc, global_backbuffer,
-                                         dimension.width, dimension.height);
+              linux_x11_get_window_dimension(display, window);
+          linux_x11_display_buffer_in_window(display, window, gc,
+                                             global_backbuffer, dimension.width,
+                                             dimension.height);
         } break;
         case ClientMessage: {
           running = false;
@@ -284,68 +300,86 @@ int main() {
 
       if (controller_found >= 0) {
         input_event input_event;
+
+        GameControllerInput *old_controller = &old_input->controllers[0];
+        GameControllerInput *new_controller = &new_input->controllers[0];
         // TODO: Maybe use (rc == 1 || rc == 0 || rc == -EAGAIN) and check
         // if(rc == o) before using the event
         while (libevdev_next_event(controller_evdev, LIBEVDEV_READ_FLAG_NORMAL,
                                    &input_event) == 0) {
           if (input_event.type == EV_KEY) {
-            const bool square =
-                (input_event.code == BTN_WEST && input_event.value == 1);
-            const bool circle =
-                (input_event.code == BTN_EAST && input_event.value == 1);
-            const bool triangle =
-                (input_event.code == BTN_NORTH && input_event.value == 1);
-            const bool cross =
-                (input_event.code == BTN_SOUTH && input_event.value == 1);
-            const bool left_shoulder =
-                (input_event.code == BTN_TL && input_event.value == 1);
-            const bool right_shoulder =
-                (input_event.code == BTN_TR && input_event.value == 1);
-            const bool start =
-                (input_event.code == BTN_START && input_event.value == 1);
-            const bool select =
-                (input_event.code == BTN_SELECT && input_event.value == 1);
+            linux_process_evdev_digital_button(&input_event,
+                                               &old_controller->left, BTN_WEST,
+                                               &new_controller->left);
+            linux_process_evdev_digital_button(&input_event,
+                                               &old_controller->right, BTN_EAST,
+                                               &new_controller->right);
+            linux_process_evdev_digital_button(&input_event,
+                                               &old_controller->up, BTN_NORTH,
+                                               &new_controller->up);
+            linux_process_evdev_digital_button(&input_event,
+                                               &old_controller->down, BTN_SOUTH,
+                                               &new_controller->down);
+            linux_process_evdev_digital_button(
+                &input_event, &old_controller->left_shoulder, BTN_TL,
+                &new_controller->left_shoulder);
+            linux_process_evdev_digital_button(
+                &input_event, &old_controller->right_shoulder, BTN_TR,
+                &new_controller->right_shoulder);
           } else if (input_event.type == EV_ABS) {
+            float x, y;
+            new_controller->is_analog = true;
             switch (input_event.code) {
             case ABS_X: {
-              const int8_t stick_x = input_event.value - 128;
+              x = input_event.value - 128;
+              if (x < 0) {
+                x /= 128.0f;
+              } else {
+                x /= 127.0f;
+              }
             } break;
             case ABS_Y: {
-              const int8_t stick_y = input_event.value - 128;
+              y = input_event.value - 128;
+              if (y < 0) {
+                y /= 128.0f;
+              } else {
+                y /= 127.0f;
+              }
             } break;
             }
+            new_controller->start_x = old_controller->start_x;
+            new_controller->start_y = old_controller->start_y;
+            new_controller->min_x = new_controller->max_x =
+                new_controller->end_x = x;
+            new_controller->min_y = new_controller->max_y =
+                new_controller->end_y = y;
           }
         }
       }
 
+      const GameOffscreenBuffer buffer{.memory = global_backbuffer.memory,
+                                       .width = global_backbuffer.width,
+                                       .height = global_backbuffer.height,
+                                       .pitch = global_backbuffer.pitch};
       const GameSoundOutputBuffer sound_buffer{
-          sound_output.samples_per_second,
-          static_cast<int>(global_sound_buffer.sound_frame_count), samples};
+          .samples_per_second = sound_output.samples_per_second,
+          .sample_count =
+              linux_alsa_get_samples_to_write(sound_output.samples_per_write),
+          .samples = samples};
+      game_update_and_render(new_input, buffer, sound_buffer);
 
-      const GameOffscreenBuffer buffer{
-          global_backbuffer.memory, global_backbuffer.width,
-          global_backbuffer.height, global_backbuffer.pitch};
-
-      game_update_and_render(buffer, sound_buffer);
-
-      if (global_sound_buffer.pcm_handle) {
-        auto frame_count = snd_pcm_avail_update(global_sound_buffer.pcm_handle);
-        frame_count =
-            std::min(frame_count,
-                     (snd_pcm_sframes_t)global_sound_buffer.sound_frame_count);
-        if (frame_count > 0) {
-          if (snd_pcm_writei(global_sound_buffer.pcm_handle,
-                             static_cast<void *>(sound_buffer.samples),
-                             frame_count) == -EPIPE) {
-            snd_pcm_prepare(global_sound_buffer.pcm_handle);
-          }
-        }
-      }
+      linux_alsa_fill_sound_buffer(sound_buffer.samples,
+                                   sound_buffer.sample_count);
 
       const LinuxWindowDimension dimension =
-          linux_get_window_dimension(display, window);
-      linux_display_buffer_in_window(display, window, gc, global_backbuffer,
-                                     dimension.width, dimension.height);
+          linux_x11_get_window_dimension(display, window);
+      linux_x11_display_buffer_in_window(display, window, gc, global_backbuffer,
+                                         dimension.width, dimension.height);
+
+      std::swap(old_input, new_input);
+      // NOTE: new_input needs to start equal to old_input because there isn't
+      // an evdev event every frame
+      *new_input = *old_input;
 
       timespec end_counter;
       clock_gettime(CLOCK_MONOTONIC_RAW, &end_counter);
