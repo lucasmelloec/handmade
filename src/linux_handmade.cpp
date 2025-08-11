@@ -25,6 +25,12 @@ struct WindowDimension {
   const int height;
 };
 
+struct SoundBuffer {
+  void *memory;
+  snd_pcm_t *pcm_handle;
+  snd_pcm_uframes_t sound_frame_count;
+};
+
 struct SoundOutput {
   const int samples_per_second;
   const int frequency;
@@ -34,31 +40,29 @@ struct SoundOutput {
 
 static bool running;
 static OffscreenBuffer global_backbuffer;
-static void *global_sound_buffer;
-static snd_pcm_t *pcm_handle;
-static snd_pcm_uframes_t sound_frame_count;
+static SoundBuffer global_sound_buffer;
 
-void init_alsa(uint32_t samples_per_second) {
+static void init_alsa(uint32_t samples_per_second) {
   const char *PCM_DEVICE = "default";
   const uint32_t CHANNELS = 2;
 
   snd_pcm_hw_params_t *hw_params;
 
-  if (snd_pcm_open(&pcm_handle, PCM_DEVICE, SND_PCM_STREAM_PLAYBACK, 0) >= 0) {
+  if (snd_pcm_open(&global_sound_buffer.pcm_handle, PCM_DEVICE, SND_PCM_STREAM_PLAYBACK, 0) >= 0) {
     snd_pcm_hw_params_alloca(&hw_params);
-    snd_pcm_hw_params_any(pcm_handle, hw_params);
+    snd_pcm_hw_params_any(global_sound_buffer.pcm_handle, hw_params);
 
-    snd_pcm_hw_params_set_access(pcm_handle, hw_params,
+    snd_pcm_hw_params_set_access(global_sound_buffer.pcm_handle, hw_params,
                                  SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_format(pcm_handle, hw_params, SND_PCM_FORMAT_S16_LE);
-    snd_pcm_hw_params_set_channels(pcm_handle, hw_params, CHANNELS);
-    snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &samples_per_second,
+    snd_pcm_hw_params_set_format(global_sound_buffer.pcm_handle, hw_params, SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(global_sound_buffer.pcm_handle, hw_params, CHANNELS);
+    snd_pcm_hw_params_set_rate_near(global_sound_buffer.pcm_handle, hw_params, &samples_per_second,
                                     0);
 
-    if (snd_pcm_hw_params(pcm_handle, hw_params) >= 0) {
-      snd_pcm_hw_params_get_period_size(hw_params, &sound_frame_count, 0);
-      global_sound_buffer =
-          mmap(NULL, sound_frame_count * CHANNELS * sizeof(int16_t),
+    if (snd_pcm_hw_params(global_sound_buffer.pcm_handle, hw_params) >= 0) {
+      snd_pcm_hw_params_get_period_size(hw_params, &global_sound_buffer.sound_frame_count, 0);
+      global_sound_buffer.memory =
+          mmap(NULL, global_sound_buffer.sound_frame_count * CHANNELS * sizeof(int16_t),
                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     }
   }
@@ -142,12 +146,12 @@ static void display_buffer_in_window(Display *const display,
             window_height);
 }
 
-static void fill_sound_buffer(SoundOutput &sound_output) {
-  int16_t *sample_out = (int16_t *)global_sound_buffer;
+static void fill_sound_buffer(const SoundBuffer sound_buffer, SoundOutput &sound_output) {
+  int16_t *sample_out = (int16_t *)sound_buffer.memory;
 
-  for (snd_pcm_uframes_t i = 0; i < sound_frame_count; ++i) {
+  for (snd_pcm_uframes_t i = 0; i < sound_buffer.sound_frame_count; ++i) {
     float t =
-        (float)(sound_output.running_sample_index * sound_frame_count + i) /
+        (float)(sound_output.running_sample_index * sound_buffer.sound_frame_count + i) /
         (float)sound_output.samples_per_second;
     float sine_value = sinf(2.0f * M_PI * sound_output.frequency * t);
 
@@ -346,11 +350,11 @@ int main() {
 
       render_weird_gradient(global_backbuffer, xoffset, yoffset);
 
-      if (pcm_handle && global_sound_buffer) {
-        fill_sound_buffer(sound_output);
-        if (snd_pcm_writei(pcm_handle, global_sound_buffer,
-                           sound_frame_count) == -EPIPE) {
-          snd_pcm_prepare(pcm_handle);
+      if (global_sound_buffer.pcm_handle && global_sound_buffer.memory) {
+        fill_sound_buffer(global_sound_buffer, sound_output);
+        if (snd_pcm_writei(global_sound_buffer.pcm_handle, global_sound_buffer.memory,
+                           global_sound_buffer.sound_frame_count) == -EPIPE) {
+          snd_pcm_prepare(global_sound_buffer.pcm_handle);
         }
       }
 
