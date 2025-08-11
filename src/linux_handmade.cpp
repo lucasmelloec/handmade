@@ -1,7 +1,10 @@
+#include "handmade.h"
+
+#include "handmade.cpp"
+
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <alsa/asoundlib.h>
-#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
@@ -10,7 +13,7 @@
 #include <sys/mman.h>
 #include <x86intrin.h>
 
-struct OffscreenBuffer {
+struct LinuxOffscreenBuffer {
   XImage image;
   void *memory;
   int memory_size;
@@ -20,18 +23,18 @@ struct OffscreenBuffer {
   int bytes_per_pixel;
 };
 
-struct WindowDimension {
+struct LinuxWindowDimension {
   const int width;
   const int height;
 };
 
-struct SoundBuffer {
+struct LinuxSoundBuffer {
   void *memory;
   snd_pcm_t *pcm_handle;
   snd_pcm_uframes_t sound_frame_count;
 };
 
-struct SoundOutput {
+struct LinuxSoundOutput {
   const int samples_per_second;
   const int frequency;
   const int16_t amplitude;
@@ -39,66 +42,53 @@ struct SoundOutput {
 };
 
 static bool running;
-static OffscreenBuffer global_backbuffer;
-static SoundBuffer global_sound_buffer;
+static LinuxOffscreenBuffer global_backbuffer;
+static LinuxSoundBuffer global_sound_buffer;
 
-static void init_alsa(uint32_t samples_per_second) {
+static void linux_init_alsa(uint32_t samples_per_second) {
   const char *PCM_DEVICE = "default";
   const uint32_t CHANNELS = 2;
 
   snd_pcm_hw_params_t *hw_params;
 
-  if (snd_pcm_open(&global_sound_buffer.pcm_handle, PCM_DEVICE, SND_PCM_STREAM_PLAYBACK, 0) >= 0) {
+  if (snd_pcm_open(&global_sound_buffer.pcm_handle, PCM_DEVICE,
+                   SND_PCM_STREAM_PLAYBACK, 0) >= 0) {
     snd_pcm_hw_params_alloca(&hw_params);
     snd_pcm_hw_params_any(global_sound_buffer.pcm_handle, hw_params);
 
     snd_pcm_hw_params_set_access(global_sound_buffer.pcm_handle, hw_params,
                                  SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_format(global_sound_buffer.pcm_handle, hw_params, SND_PCM_FORMAT_S16_LE);
-    snd_pcm_hw_params_set_channels(global_sound_buffer.pcm_handle, hw_params, CHANNELS);
-    snd_pcm_hw_params_set_rate_near(global_sound_buffer.pcm_handle, hw_params, &samples_per_second,
-                                    0);
+    snd_pcm_hw_params_set_format(global_sound_buffer.pcm_handle, hw_params,
+                                 SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(global_sound_buffer.pcm_handle, hw_params,
+                                   CHANNELS);
+    snd_pcm_hw_params_set_rate_near(global_sound_buffer.pcm_handle, hw_params,
+                                    &samples_per_second, 0);
 
     if (snd_pcm_hw_params(global_sound_buffer.pcm_handle, hw_params) >= 0) {
-      snd_pcm_hw_params_get_period_size(hw_params, &global_sound_buffer.sound_frame_count, 0);
-      global_sound_buffer.memory =
-          mmap(NULL, global_sound_buffer.sound_frame_count * CHANNELS * sizeof(int16_t),
-               PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      snd_pcm_hw_params_get_period_size(
+          hw_params, &global_sound_buffer.sound_frame_count, 0);
+      global_sound_buffer.memory = mmap(
+          NULL,
+          global_sound_buffer.sound_frame_count * CHANNELS * sizeof(int16_t),
+          PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     }
   }
 }
 
-WindowDimension get_window_dimension(Display *const display,
-                                     const Window window) {
+static LinuxWindowDimension linux_get_window_dimension(Display *const display,
+                                                 const Window window) {
   XWindowAttributes window_attrs;
   if (XGetWindowAttributes(display, window, &window_attrs) != 0) {
-    return WindowDimension{window_attrs.width, window_attrs.height};
+    return LinuxWindowDimension{window_attrs.width, window_attrs.height};
   } else {
     // TODO: Log error
-    return WindowDimension{};
+    return LinuxWindowDimension{};
   }
 }
 
-static void render_weird_gradient(const OffscreenBuffer buffer,
-                                  const int blue_offset,
-                                  const int green_offset) {
-  uint8_t *row = (uint8_t *)buffer.memory;
-
-  for (int y = 0; y < buffer.height; ++y) {
-    uint32_t *pixel = (uint32_t *)row;
-    for (int x = 0; x < buffer.width; ++x) {
-      auto blue = (x + blue_offset);
-      auto green = (y + green_offset);
-
-      *pixel++ = ((green << 8) | blue);
-    }
-
-    row += buffer.pitch;
-  }
-}
-
-static void resize_bitmap(Display *const display, const int screen,
-                          OffscreenBuffer &buffer, const int width,
+static void linux_resize_bitmap(Display *const display, const int screen,
+                          LinuxOffscreenBuffer &buffer, const int width,
                           const int height) {
   // TODO: maybe only destroy after successfully creating another one, and if
   // failed, destroy first
@@ -137,22 +127,24 @@ static void resize_bitmap(Display *const display, const int screen,
   }
 }
 
-static void display_buffer_in_window(Display *const display,
+static void linux_display_buffer_in_window(Display *const display,
                                      const Window window, const GC gc,
-                                     OffscreenBuffer buffer,
+                                     LinuxOffscreenBuffer buffer,
                                      const int window_width,
                                      const int window_height) {
   XPutImage(display, window, gc, &buffer.image, 0, 0, 0, 0, window_width,
             window_height);
 }
 
-static void fill_sound_buffer(const SoundBuffer sound_buffer, SoundOutput &sound_output) {
+static void linux_fill_sound_buffer(const LinuxSoundBuffer sound_buffer,
+                              LinuxSoundOutput &sound_output) {
   int16_t *sample_out = (int16_t *)sound_buffer.memory;
 
   for (snd_pcm_uframes_t i = 0; i < sound_buffer.sound_frame_count; ++i) {
-    float t =
-        (float)(sound_output.running_sample_index * sound_buffer.sound_frame_count + i) /
-        (float)sound_output.samples_per_second;
+    float t = (float)(sound_output.running_sample_index *
+                          sound_buffer.sound_frame_count +
+                      i) /
+              (float)sound_output.samples_per_second;
     float sine_value = sinf(2.0f * M_PI * sound_output.frequency * t);
 
     int16_t sample_value = (int16_t)(sine_value * sound_output.amplitude);
@@ -191,7 +183,7 @@ int main() {
     }
     const GC gc = XCreateGC(display, window, 0, NULL);
 
-    resize_bitmap(display, screen, global_backbuffer, 800, 600);
+    linux_resize_bitmap(display, screen, global_backbuffer, 800, 600);
 
     libevdev *controller_evdev = NULL;
     int controller_found = -1;
@@ -227,16 +219,13 @@ int main() {
       }
     }
 
-    int xoffset = 0;
-    int yoffset = 0;
-
-    SoundOutput sound_output{
+    LinuxSoundOutput sound_output{
         48000,
         261,
         6000,
     };
 
-    init_alsa(sound_output.samples_per_second);
+    linux_init_alsa(sound_output.samples_per_second);
 
     running = true;
 
@@ -249,13 +238,13 @@ int main() {
         XNextEvent(display, &event);
         switch (event.type) {
         case ConfigureNotify: {
-          resize_bitmap(display, screen, global_backbuffer,
+          linux_resize_bitmap(display, screen, global_backbuffer,
                         event.xconfigure.width, event.xconfigure.height);
         } break;
         case Expose: {
-          const WindowDimension dimension =
-              get_window_dimension(display, window);
-          display_buffer_in_window(display, window, gc, global_backbuffer,
+          const LinuxWindowDimension dimension =
+              linux_get_window_dimension(display, window);
+          linux_display_buffer_in_window(display, window, gc, global_backbuffer,
                                    dimension.width, dimension.height);
         } break;
         case ClientMessage: {
@@ -348,18 +337,23 @@ int main() {
         }
       }
 
-      render_weird_gradient(global_backbuffer, xoffset, yoffset);
+      const GameOffscreenBuffer buffer{
+          global_backbuffer.memory, global_backbuffer.width,
+          global_backbuffer.height, global_backbuffer.pitch};
+      game_update_and_render(buffer);
 
       if (global_sound_buffer.pcm_handle && global_sound_buffer.memory) {
-        fill_sound_buffer(global_sound_buffer, sound_output);
-        if (snd_pcm_writei(global_sound_buffer.pcm_handle, global_sound_buffer.memory,
+        linux_fill_sound_buffer(global_sound_buffer, sound_output);
+        if (snd_pcm_writei(global_sound_buffer.pcm_handle,
+                           global_sound_buffer.memory,
                            global_sound_buffer.sound_frame_count) == -EPIPE) {
           snd_pcm_prepare(global_sound_buffer.pcm_handle);
         }
       }
 
-      const WindowDimension dimension = get_window_dimension(display, window);
-      display_buffer_in_window(display, window, gc, global_backbuffer,
+      const LinuxWindowDimension dimension =
+          linux_get_window_dimension(display, window);
+      linux_display_buffer_in_window(display, window, gc, global_backbuffer,
                                dimension.width, dimension.height);
 
       timespec end_counter;
