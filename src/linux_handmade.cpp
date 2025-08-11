@@ -1,14 +1,14 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <alsa/asoundlib.h>
-#include <cerrno>
-#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <dirent.h>
 #include <libevdev/libevdev.h>
 #include <math.h>
 #include <sys/mman.h>
+#include <x86intrin.h>
 
 struct OffscreenBuffer {
   XImage image;
@@ -64,7 +64,8 @@ void init_alsa(uint32_t samples_per_second) {
   }
 }
 
-WindowDimension get_window_dimension(Display *display, Window window) {
+WindowDimension get_window_dimension(Display *const display,
+                                     const Window window) {
   XWindowAttributes window_attrs;
   if (XGetWindowAttributes(display, window, &window_attrs) != 0) {
     return WindowDimension{window_attrs.width, window_attrs.height};
@@ -74,8 +75,9 @@ WindowDimension get_window_dimension(Display *display, Window window) {
   }
 }
 
-static void render_weird_gradient(OffscreenBuffer buffer, int blue_offset,
-                                  int green_offset) {
+static void render_weird_gradient(const OffscreenBuffer buffer,
+                                  const int blue_offset,
+                                  const int green_offset) {
   uint8_t *row = (uint8_t *)buffer.memory;
 
   for (int y = 0; y < buffer.height; ++y) {
@@ -91,8 +93,9 @@ static void render_weird_gradient(OffscreenBuffer buffer, int blue_offset,
   }
 }
 
-static void resize_bitmap(Display *display, int screen, OffscreenBuffer &buffer,
-                          int width, int height) {
+static void resize_bitmap(Display *const display, const int screen,
+                          OffscreenBuffer &buffer, const int width,
+                          const int height) {
   // TODO: maybe only destroy after successfully creating another one, and if
   // failed, destroy first
   if (buffer.memory) {
@@ -130,27 +133,29 @@ static void resize_bitmap(Display *display, int screen, OffscreenBuffer &buffer,
   }
 }
 
-static void display_buffer_in_window(Display *display, Window window, GC gc,
-                                     OffscreenBuffer buffer, int window_width,
-                                     int window_height) {
+static void display_buffer_in_window(Display *const display,
+                                     const Window window, const GC gc,
+                                     OffscreenBuffer buffer,
+                                     const int window_width,
+                                     const int window_height) {
   XPutImage(display, window, gc, &buffer.image, 0, 0, 0, 0, window_width,
             window_height);
 }
 
-static void fill_sound_buffer(SoundOutput *sound_output) {
+static void fill_sound_buffer(SoundOutput &sound_output) {
   int16_t *sample_out = (int16_t *)global_sound_buffer;
 
   for (snd_pcm_uframes_t i = 0; i < sound_frame_count; ++i) {
     float t =
-        (float)(sound_output->running_sample_index * sound_frame_count + i) /
-        (float)sound_output->samples_per_second;
-    float sine_value = sinf(2.0f * M_PI * sound_output->frequency * t);
+        (float)(sound_output.running_sample_index * sound_frame_count + i) /
+        (float)sound_output.samples_per_second;
+    float sine_value = sinf(2.0f * M_PI * sound_output.frequency * t);
 
-    int16_t sample_value = (int16_t)(sine_value * sound_output->amplitude);
+    int16_t sample_value = (int16_t)(sine_value * sound_output.amplitude);
     *sample_out++ = sample_value;
     *sample_out++ = sample_value;
   }
-  ++sound_output->running_sample_index;
+  ++sound_output.running_sample_index;
 }
 
 int main() {
@@ -184,7 +189,7 @@ int main() {
 
     resize_bitmap(display, screen, global_backbuffer, 800, 600);
 
-    libevdev * controller_evdev = NULL;
+    libevdev *controller_evdev = NULL;
     int controller_found = -1;
 
     {
@@ -211,7 +216,8 @@ int main() {
         }
         closedir(dir);
 
-        const int controller_fd = open(joystick_filename, O_RDONLY | O_NONBLOCK);
+        const int controller_fd =
+            open(joystick_filename, O_RDONLY | O_NONBLOCK);
         controller_found =
             libevdev_new_from_fd(controller_fd, &controller_evdev);
       }
@@ -229,6 +235,10 @@ int main() {
     init_alsa(sound_output.samples_per_second);
 
     running = true;
+
+    timespec last_counter;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &last_counter);
+    int64_t last_cycle_count = __rdtsc();
     while (running) {
       while (XPending(display)) {
         XEvent event;
@@ -239,7 +249,8 @@ int main() {
                         event.xconfigure.width, event.xconfigure.height);
         } break;
         case Expose: {
-          const WindowDimension dimension = get_window_dimension(display, window);
+          const WindowDimension dimension =
+              get_window_dimension(display, window);
           display_buffer_in_window(display, window, gc, global_backbuffer,
                                    dimension.width, dimension.height);
         } break;
@@ -336,7 +347,7 @@ int main() {
       render_weird_gradient(global_backbuffer, xoffset, yoffset);
 
       if (pcm_handle && global_sound_buffer) {
-        fill_sound_buffer(&sound_output);
+        fill_sound_buffer(sound_output);
         if (snd_pcm_writei(pcm_handle, global_sound_buffer,
                            sound_frame_count) == -EPIPE) {
           snd_pcm_prepare(pcm_handle);
@@ -347,8 +358,26 @@ int main() {
       display_buffer_in_window(display, window, gc, global_backbuffer,
                                dimension.width, dimension.height);
 
-      ++xoffset;
-      yoffset += 2;
+      timespec end_counter;
+      clock_gettime(CLOCK_MONOTONIC_RAW, &end_counter);
+
+      int64_t end_cycle_count = __rdtsc();
+
+      float cycles_elapsed =
+          (float)(end_cycle_count - last_cycle_count) / (1000.0f * 1000.0f);
+
+      float counter_elapsed =
+          ((end_counter.tv_sec - last_counter.tv_sec) * 1000) +
+          ((float)(end_counter.tv_nsec - last_counter.tv_nsec) /
+           (1000.0f * 1000.0f));
+      float fps = 1000.0f / (float)counter_elapsed;
+      fprintf(stdout, "%.02f ms, %.02f FPS, %.02f Mcycles\n", counter_elapsed,
+              fps, cycles_elapsed);
+
+      last_counter = end_counter;
+      last_cycle_count = end_cycle_count;
+
+      usleep(1000);
     }
   } else {
     // TODO: log
