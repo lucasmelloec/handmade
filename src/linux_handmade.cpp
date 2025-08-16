@@ -14,7 +14,7 @@
 #include <sys/mman.h>
 #include <x86intrin.h>
 
-const uint32_t CHANNELS = 2;
+static constexpr uint32_t CHANNELS = 2;
 
 static bool running;
 static LinuxX11OffscreenBuffer global_backbuffer;
@@ -212,195 +212,218 @@ int main() {
     int16_t *samples = static_cast<int16_t *>(
         mmap(NULL, sound_output.samples_per_write * CHANNELS * sizeof(int16_t),
              PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    GameMemory game_memory{
+        .is_initialized = false,
+        .permanent_storage_size = MEGABYTES(64),
+        .transient_storage_size = GIGABYTES(4),
+    };
 
-    memset(samples, 0,
-           sound_output.samples_per_write * sizeof(int16_t) * CHANNELS);
-    linux_alsa_fill_sound_buffer(samples, sound_output.samples_per_write);
+#if HANDMADE_INTERNAL
+    void *address = (void *)TERABYTES(1);
+#else
+    void *address = 0;
+#endif
 
-    GameInput input[2] = {};
-    GameInput *new_input = &input[0];
-    GameInput *old_input = &input[1];
+    uint64_t total_size = game_memory.permanent_storage_size + game_memory.transient_storage_size;
+    game_memory.permanent_storage =
+        mmap(address, total_size,
+             PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    game_memory.transient_storage = (uint8_t *)game_memory.permanent_storage + game_memory.permanent_storage_size;
 
-    running = true;
+    if (samples && game_memory.permanent_storage &&
+        game_memory.transient_storage) {
 
-    timespec last_counter;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &last_counter);
-    int64_t last_cycle_count = __rdtsc();
+      linux_alsa_fill_sound_buffer(samples, sound_output.samples_per_write);
 
-    while (running) {
-      while (XPending(display)) {
-        XEvent event;
-        XNextEvent(display, &event);
-        switch (event.type) {
-        case ConfigureNotify: {
-          linux_x11_resize_bitmap(display, screen, global_backbuffer,
-                                  event.xconfigure.width,
-                                  event.xconfigure.height);
-        } break;
-        case Expose: {
-          const LinuxWindowDimension dimension =
-              linux_x11_get_window_dimension(display, window);
-          linux_x11_display_buffer_in_window(display, window, gc,
-                                             global_backbuffer, dimension.width,
-                                             dimension.height);
-        } break;
-        case ClientMessage: {
-          running = false;
-        } break;
-        case DestroyNotify: {
-          running = false;
-        } break;
-        case KeyPress:
-        case KeyRelease: {
-          const bool just_released = event.xkey.type == KeyRelease;
-          bool is_down = event.xkey.type == KeyPress;
-          if (event.xkey.type == KeyRelease && XPending(display)) {
-            XEvent next_event;
-            XPeekEvent(display, &next_event);
-            if (next_event.xkey.type == KeyPress &&
-                next_event.xkey.time == event.xkey.time &&
-                next_event.xkey.keycode == event.xkey.keycode) {
-              XNextEvent(display, &next_event);
-              is_down = true;
-            }
-          }
-          if (is_down != just_released) {
-            switch (XLookupKeysym(&event.xkey, 0)) {
-            case 'w': {
-              fprintf(stdout, "W\n");
-            } break;
-            case 'a': {
-              fprintf(stdout, "A\n");
-            } break;
-            case 's': {
-              fprintf(stdout, "S\n");
-            } break;
-            case 'd': {
-              fprintf(stdout, "D\n");
-            } break;
-            case 'q': {
-              fprintf(stdout, "Q\n");
-            } break;
-            case 'e': {
-              fprintf(stdout, "E\n");
-            } break;
-            case XK_Escape: {
-              fprintf(stdout, "Escape\n");
-            } break;
-            case XK_space: {
-              fprintf(stdout, "Space\n");
-            } break;
-            }
-          }
-        } break;
-        default:
-          break;
-        }
-      }
+      GameInput input[2] = {};
+      GameInput *new_input = &input[0];
+      GameInput *old_input = &input[1];
 
-      if (controller_found >= 0) {
-        input_event input_event;
+      running = true;
 
-        GameControllerInput *old_controller = &old_input->controllers[0];
-        GameControllerInput *new_controller = &new_input->controllers[0];
-        // TODO: Maybe use (rc == 1 || rc == 0 || rc == -EAGAIN) and check
-        // if(rc == o) before using the event
-        while (libevdev_next_event(controller_evdev, LIBEVDEV_READ_FLAG_NORMAL,
-                                   &input_event) == 0) {
-          if (input_event.type == EV_KEY) {
-            linux_process_evdev_digital_button(&input_event,
-                                               &old_controller->left, BTN_WEST,
-                                               &new_controller->left);
-            linux_process_evdev_digital_button(&input_event,
-                                               &old_controller->right, BTN_EAST,
-                                               &new_controller->right);
-            linux_process_evdev_digital_button(&input_event,
-                                               &old_controller->up, BTN_NORTH,
-                                               &new_controller->up);
-            linux_process_evdev_digital_button(&input_event,
-                                               &old_controller->down, BTN_SOUTH,
-                                               &new_controller->down);
-            linux_process_evdev_digital_button(
-                &input_event, &old_controller->left_shoulder, BTN_TL,
-                &new_controller->left_shoulder);
-            linux_process_evdev_digital_button(
-                &input_event, &old_controller->right_shoulder, BTN_TR,
-                &new_controller->right_shoulder);
-          } else if (input_event.type == EV_ABS) {
-            float x, y;
-            new_controller->is_analog = true;
-            switch (input_event.code) {
-            case ABS_X: {
-              x = input_event.value - 128;
-              if (x < 0) {
-                x /= 128.0f;
-              } else {
-                x /= 127.0f;
+      timespec last_counter;
+      clock_gettime(CLOCK_MONOTONIC_RAW, &last_counter);
+      int64_t last_cycle_count = __rdtsc();
+
+      while (running) {
+        while (XPending(display)) {
+          XEvent event;
+          XNextEvent(display, &event);
+          switch (event.type) {
+          case ConfigureNotify: {
+            linux_x11_resize_bitmap(display, screen, global_backbuffer,
+                                    event.xconfigure.width,
+                                    event.xconfigure.height);
+          } break;
+          case Expose: {
+            const LinuxWindowDimension dimension =
+                linux_x11_get_window_dimension(display, window);
+            linux_x11_display_buffer_in_window(
+                display, window, gc, global_backbuffer, dimension.width,
+                dimension.height);
+          } break;
+          case ClientMessage: {
+            running = false;
+          } break;
+          case DestroyNotify: {
+            running = false;
+          } break;
+          case KeyPress:
+          case KeyRelease: {
+            const bool just_released = event.xkey.type == KeyRelease;
+            bool is_down = event.xkey.type == KeyPress;
+            if (event.xkey.type == KeyRelease && XPending(display)) {
+              XEvent next_event;
+              XPeekEvent(display, &next_event);
+              if (next_event.xkey.type == KeyPress &&
+                  next_event.xkey.time == event.xkey.time &&
+                  next_event.xkey.keycode == event.xkey.keycode) {
+                XNextEvent(display, &next_event);
+                is_down = true;
               }
-            } break;
-            case ABS_Y: {
-              y = input_event.value - 128;
-              if (y < 0) {
-                y /= 128.0f;
-              } else {
-                y /= 127.0f;
-              }
-            } break;
             }
-            new_controller->start_x = old_controller->start_x;
-            new_controller->start_y = old_controller->start_y;
-            new_controller->min_x = new_controller->max_x =
-                new_controller->end_x = x;
-            new_controller->min_y = new_controller->max_y =
-                new_controller->end_y = y;
+            if (is_down != just_released) {
+              switch (XLookupKeysym(&event.xkey, 0)) {
+              case 'w': {
+                fprintf(stdout, "W\n");
+              } break;
+              case 'a': {
+                fprintf(stdout, "A\n");
+              } break;
+              case 's': {
+                fprintf(stdout, "S\n");
+              } break;
+              case 'd': {
+                fprintf(stdout, "D\n");
+              } break;
+              case 'q': {
+                fprintf(stdout, "Q\n");
+              } break;
+              case 'e': {
+                fprintf(stdout, "E\n");
+              } break;
+              case XK_Escape: {
+                fprintf(stdout, "Escape\n");
+              } break;
+              case XK_space: {
+                fprintf(stdout, "Space\n");
+              } break;
+              }
+            }
+          } break;
+          default:
+            break;
           }
         }
+
+        if (controller_found >= 0) {
+          input_event input_event;
+
+          GameControllerInput *old_controller = &old_input->controllers[0];
+          GameControllerInput *new_controller = &new_input->controllers[0];
+          // TODO: Maybe use (rc == 1 || rc == 0 || rc == -EAGAIN) and check
+          // if(rc == o) before using the event
+          while (libevdev_next_event(controller_evdev,
+                                     LIBEVDEV_READ_FLAG_NORMAL,
+                                     &input_event) == 0) {
+            if (input_event.type == EV_KEY) {
+              linux_process_evdev_digital_button(
+                  &input_event, &old_controller->left, BTN_WEST,
+                  &new_controller->left);
+              linux_process_evdev_digital_button(
+                  &input_event, &old_controller->right, BTN_EAST,
+                  &new_controller->right);
+              linux_process_evdev_digital_button(&input_event,
+                                                 &old_controller->up, BTN_NORTH,
+                                                 &new_controller->up);
+              linux_process_evdev_digital_button(
+                  &input_event, &old_controller->down, BTN_SOUTH,
+                  &new_controller->down);
+              linux_process_evdev_digital_button(
+                  &input_event, &old_controller->left_shoulder, BTN_TL,
+                  &new_controller->left_shoulder);
+              linux_process_evdev_digital_button(
+                  &input_event, &old_controller->right_shoulder, BTN_TR,
+                  &new_controller->right_shoulder);
+            } else if (input_event.type == EV_ABS) {
+              float x, y;
+              new_controller->is_analog = true;
+              switch (input_event.code) {
+              case ABS_X: {
+                x = input_event.value - 128;
+                if (x < 0) {
+                  x /= 128.0f;
+                } else {
+                  x /= 127.0f;
+                }
+              } break;
+              case ABS_Y: {
+                y = input_event.value - 128;
+                if (y < 0) {
+                  y /= 128.0f;
+                } else {
+                  y /= 127.0f;
+                }
+              } break;
+              }
+              new_controller->start_x = old_controller->start_x;
+              new_controller->start_y = old_controller->start_y;
+              new_controller->min_x = new_controller->max_x =
+                  new_controller->end_x = x;
+              new_controller->min_y = new_controller->max_y =
+                  new_controller->end_y = y;
+            }
+          }
+        }
+
+        const GameOffscreenBuffer buffer{.memory = global_backbuffer.memory,
+                                         .width = global_backbuffer.width,
+                                         .height = global_backbuffer.height,
+                                         .pitch = global_backbuffer.pitch};
+        const GameSoundOutputBuffer sound_buffer{
+            .samples_per_second = sound_output.samples_per_second,
+            .sample_count =
+                linux_alsa_get_samples_to_write(sound_output.samples_per_write),
+            .samples = samples};
+        game_update_and_render(new_input, buffer, sound_buffer, game_memory);
+
+        linux_alsa_fill_sound_buffer(sound_buffer.samples,
+                                     sound_buffer.sample_count);
+
+        const LinuxWindowDimension dimension =
+            linux_x11_get_window_dimension(display, window);
+        linux_x11_display_buffer_in_window(display, window, gc,
+                                           global_backbuffer, dimension.width,
+                                           dimension.height);
+
+        std::swap(old_input, new_input);
+        // NOTE: new_input needs to start equal to old_input because there isn't
+        // an evdev event every frame
+        *new_input = *old_input;
+
+        timespec end_counter;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &end_counter);
+
+        int64_t end_cycle_count = __rdtsc();
+
+        float cycles_elapsed =
+            (float)(end_cycle_count - last_cycle_count) / (1000.0f * 1000.0f);
+
+        float counter_elapsed =
+            ((end_counter.tv_sec - last_counter.tv_sec) * 1000) +
+            ((float)(end_counter.tv_nsec - last_counter.tv_nsec) /
+             (1000.0f * 1000.0f));
+        float fps = 1000.0f / (float)counter_elapsed;
+        fprintf(stdout, "%.02f ms, %.02f FPS, %.02f Mcycles\n", counter_elapsed,
+                fps, cycles_elapsed);
+
+        last_counter = end_counter;
+        last_cycle_count = end_cycle_count;
+
+        usleep(1000);
       }
-
-      const GameOffscreenBuffer buffer{.memory = global_backbuffer.memory,
-                                       .width = global_backbuffer.width,
-                                       .height = global_backbuffer.height,
-                                       .pitch = global_backbuffer.pitch};
-      const GameSoundOutputBuffer sound_buffer{
-          .samples_per_second = sound_output.samples_per_second,
-          .sample_count =
-              linux_alsa_get_samples_to_write(sound_output.samples_per_write),
-          .samples = samples};
-      game_update_and_render(new_input, buffer, sound_buffer);
-
-      linux_alsa_fill_sound_buffer(sound_buffer.samples,
-                                   sound_buffer.sample_count);
-
-      const LinuxWindowDimension dimension =
-          linux_x11_get_window_dimension(display, window);
-      linux_x11_display_buffer_in_window(display, window, gc, global_backbuffer,
-                                         dimension.width, dimension.height);
-
-      std::swap(old_input, new_input);
-      // NOTE: new_input needs to start equal to old_input because there isn't
-      // an evdev event every frame
-      *new_input = *old_input;
-
-      timespec end_counter;
-      clock_gettime(CLOCK_MONOTONIC_RAW, &end_counter);
-
-      int64_t end_cycle_count = __rdtsc();
-
-      float cycles_elapsed =
-          (float)(end_cycle_count - last_cycle_count) / (1000.0f * 1000.0f);
-
-      float counter_elapsed =
-          ((end_counter.tv_sec - last_counter.tv_sec) * 1000) +
-          ((float)(end_counter.tv_nsec - last_counter.tv_nsec) /
-           (1000.0f * 1000.0f));
-      float fps = 1000.0f / (float)counter_elapsed;
-      fprintf(stdout, "%.02f ms, %.02f FPS, %.02f Mcycles\n", counter_elapsed,
-              fps, cycles_elapsed);
-
-      last_counter = end_counter;
-      last_cycle_count = end_cycle_count;
-
-      usleep(1000);
+    } else {
+      // TODO: log
     }
   } else {
     // TODO: log

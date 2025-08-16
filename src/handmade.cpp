@@ -39,21 +39,29 @@ static void render_weird_gradient(const GameOffscreenBuffer &buffer,
 
 void game_update_and_render(const GameInput *input,
                             const GameOffscreenBuffer &buffer,
-                            const GameSoundOutputBuffer &sound_buffer) {
-  static int green_offset, blue_offset = 0;
-  static int frequency = 256;
+                            const GameSoundOutputBuffer &sound_buffer,
+                            GameMemory &memory) {
+  ASSERT(sizeof(GameState) <= memory.permanent_storage_size);
+  GameState *game_state = (GameState *)memory.permanent_storage;
+  if (!memory.is_initialized) {
+    game_state->frequency = 256;
+
+    // TODO: Maybe it's more appropriate to do this in the platform layer
+    memory.is_initialized = true;
+  }
 
   const GameControllerInput &input0 = input->controllers[0];
   if (input0.is_analog) {
-    blue_offset += (int)4.0f * (input0.end_x);
-    frequency = 256 + (int)(128.0f * (input0.end_y));
+    game_state->blue_offset += (int)4.0f * (input0.end_x);
+    game_state->frequency = 256 + (int)(128.0f * (input0.end_y));
   } else {
   }
 
   if (input0.down.ended_down) {
-    green_offset += 1;
+    game_state->green_offset += 1;
   }
 
-  game_output_sound(sound_buffer, frequency);
-  render_weird_gradient(buffer, blue_offset, green_offset);
+  game_output_sound(sound_buffer, game_state->frequency);
+  render_weird_gradient(buffer, game_state->blue_offset,
+                        game_state->green_offset);
 }
