@@ -10,8 +10,10 @@
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
+#include <fcntl.h>
 #include <libevdev/libevdev.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <x86intrin.h>
 
 static constexpr uint32_t CHANNELS = 2;
@@ -117,10 +119,14 @@ static void linux_process_evdev_digital_button(input_event *input_event,
 
 static int32_t linux_alsa_get_samples_to_write(int32_t sample_count) {
   snd_pcm_sframes_t delay = 0;
+  snd_pcm_sframes_t available = sample_count;
+  int32_t result;
+
   if (pcm_handle) {
-    snd_pcm_delay(pcm_handle, &delay);
+    snd_pcm_avail_delay(pcm_handle, &available, &delay);
   }
-  return sample_count - delay;
+  result = sample_count - delay;
+  return std::min(result, (int32_t)available);
 }
 
 static void linux_alsa_fill_sound_buffer(int16_t *samples,
@@ -133,6 +139,66 @@ static void linux_alsa_fill_sound_buffer(int16_t *samples,
       snd_pcm_prepare(pcm_handle);
     }
   }
+}
+
+static DEBUGReadFileResult
+DEBUG_platform_read_entire_file(const char *filename) {
+  DEBUGReadFileResult result = {};
+  int fd = open(filename, O_RDONLY);
+  if (fd > 0) {
+    struct stat file_status;
+    if (fstat(fd, &file_status) == 0) {
+      result.content_size = SAFE_TRUNCATE_U64(file_status.st_size);
+      result.content =
+          mmap(NULL, result.content_size * sizeof(uint32_t),
+               PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      if (result.content) {
+        if (read(fd, result.content, result.content_size) ==
+            result.content_size) {
+          // File read successfully
+        } else {
+          DEBUG_platform_free_file_memory(result);
+          // TODO: Log
+        }
+      } else {
+        // TODO: Log
+      }
+    } else {
+      // TODO: Log
+    }
+
+    close(fd);
+  } else {
+    // TODO: Log
+  }
+
+  return result;
+}
+
+static bool DEBUG_platform_write_entire_file(const char *filename,
+                                             uint32_t size, void *content) {
+  bool result = false;
+
+  int fd =
+      open(filename, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+  if (fd > 0) {
+    if (write(fd, content, size) == size) {
+      result = true;
+    } else {
+      // TODO: Log
+    }
+    close(fd);
+  } else {
+    // TODO: Log
+  }
+
+  return result;
+}
+
+static void
+DEBUG_platform_free_file_memory(DEBUGReadFileResult &read_file_result) {
+  munmap(read_file_result.content, read_file_result.content_size);
+  read_file_result.content = NULL;
 }
 
 int main() {
@@ -224,11 +290,13 @@ int main() {
     void *address = 0;
 #endif
 
-    uint64_t total_size = game_memory.permanent_storage_size + game_memory.transient_storage_size;
+    uint64_t total_size =
+        game_memory.permanent_storage_size + game_memory.transient_storage_size;
     game_memory.permanent_storage =
-        mmap(address, total_size,
-             PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    game_memory.transient_storage = (uint8_t *)game_memory.permanent_storage + game_memory.permanent_storage_size;
+        mmap(address, total_size, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    game_memory.transient_storage = (uint8_t *)game_memory.permanent_storage +
+                                    game_memory.permanent_storage_size;
 
     if (samples && game_memory.permanent_storage &&
         game_memory.transient_storage) {

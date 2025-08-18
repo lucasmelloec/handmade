@@ -29,6 +29,29 @@ constexpr uint64_t TERABYTES(const uint64_t value) {
   return GIGABYTES(value) * 1024;
 }
 
+static inline uint32_t SAFE_TRUNCATE_U64(uint64_t value) {
+  ASSERT(value <= 0xffffffff);
+  uint32_t result = value;
+  return result;
+}
+
+/*
+ * NOTE: Code made available by the platform layer to the game layer
+ */
+
+#if HANDMADE_INTERNAL
+struct DEBUGReadFileResult {
+  uint32_t content_size;
+  void *content;
+};
+static DEBUGReadFileResult
+DEBUG_platform_read_entire_file(const char *filename);
+static bool DEBUG_platform_write_entire_file(const char *filename,
+                                             uint32_t size, void *content);
+static void
+DEBUG_platform_free_file_memory(DEBUGReadFileResult &read_file_result);
+#endif
+
 /*
  * NOTE: Code made available by the game layer to the platform layer
  */

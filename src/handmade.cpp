@@ -44,6 +44,13 @@ void game_update_and_render(const GameInput *input,
   ASSERT(sizeof(GameState) <= memory.permanent_storage_size);
   GameState *game_state = (GameState *)memory.permanent_storage;
   if (!memory.is_initialized) {
+    const char *filename = __FILE__;
+    DEBUGReadFileResult file = DEBUG_platform_read_entire_file(filename);
+    if (file.content) {
+      DEBUG_platform_write_entire_file("text.txt", file.content_size, file.content);
+      DEBUG_platform_free_file_memory(file);
+    }
+
     game_state->frequency = 256;
 
     // TODO: Maybe it's more appropriate to do this in the platform layer
