@@ -20,7 +20,10 @@
           packages = with pkgs; [
             gcc
             clang-tools
+            clang
             gdb
+            # Used to allow 32 bit compilation
+            # pkgs.pkgsi686Linux.glibc.dev
           ];
 
           buildInputs = with pkgs; [

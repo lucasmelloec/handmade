@@ -14,6 +14,7 @@
 #include <libevdev/libevdev.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <x86intrin.h>
 
 static constexpr uint32_t CHANNELS = 2;
@@ -51,16 +52,17 @@ static LinuxWindowDimension
 linux_x11_get_window_dimension(Display *const display, const Window window) {
   XWindowAttributes window_attrs;
   if (XGetWindowAttributes(display, window, &window_attrs) != 0) {
-    return LinuxWindowDimension{window_attrs.width, window_attrs.height};
+    return LinuxWindowDimension{(uint32_t)window_attrs.width,
+                                (uint32_t)window_attrs.height};
   } else {
     // TODO: Log error
     return LinuxWindowDimension{};
   }
 }
 
-static void linux_x11_resize_bitmap(Display *const display, const int screen,
-                                    LinuxX11OffscreenBuffer &buffer,
-                                    const int width, const int height) {
+static void linux_x11_resize_bitmap(LinuxX11OffscreenBuffer &buffer,
+                                    const uint32_t width,
+                                    const uint32_t height) {
   // TODO: maybe only destroy after successfully creating another one, and if
   // failed, destroy first
   if (buffer.memory) {
@@ -77,8 +79,8 @@ static void linux_x11_resize_bitmap(Display *const display, const int screen,
 
   buffer.pitch = width * buffer.bytes_per_pixel;
 
-  buffer.image.width = width;
-  buffer.image.height = height;
+  buffer.image.width = (int)width;
+  buffer.image.height = (int)height;
   buffer.image.xoffset = 0;
   buffer.image.format = ZPixmap;
   buffer.image.data = (char *)buffer.memory;
@@ -87,7 +89,7 @@ static void linux_x11_resize_bitmap(Display *const display, const int screen,
   buffer.image.bitmap_bit_order = LSBFirst;
   buffer.image.bitmap_pad = 32;
   buffer.image.depth = 24;
-  buffer.image.bytes_per_line = width * buffer.bytes_per_pixel;
+  buffer.image.bytes_per_line = (int)(width * buffer.bytes_per_pixel);
   buffer.image.bits_per_pixel = 32;
   buffer.image.red_mask = 0x00FF0000;
   buffer.image.green_mask = 0x0000FF00;
@@ -101,8 +103,8 @@ static void linux_x11_resize_bitmap(Display *const display, const int screen,
 static void linux_x11_display_buffer_in_window(Display *const display,
                                                const Window window, const GC gc,
                                                LinuxX11OffscreenBuffer buffer,
-                                               const int window_width,
-                                               const int window_height) {
+                                               const uint32_t window_width,
+                                               const uint32_t window_height) {
   XPutImage(display, window, gc, &buffer.image, 0, 0, 0, 0, window_width,
             window_height);
 }
@@ -117,22 +119,23 @@ static void linux_process_evdev_digital_button(input_event *input_event,
       (old_state->ended_down != new_state->ended_down) ? 1 : 0;
 }
 
-static int32_t linux_alsa_get_samples_to_write(int32_t sample_count) {
+static uint32_t linux_alsa_get_samples_to_write(uint32_t sample_count) {
   snd_pcm_sframes_t delay = 0;
-  snd_pcm_sframes_t available = sample_count;
-  int32_t result;
+  snd_pcm_sframes_t available = (snd_pcm_sframes_t)sample_count;
+  uint32_t result;
 
   if (pcm_handle) {
     snd_pcm_avail_delay(pcm_handle, &available, &delay);
   }
-  result = sample_count - delay;
-  return std::min(result, (int32_t)available);
+  result = sample_count - (uint32_t)delay;
+  return std::min(result, (uint32_t)available);
 }
 
 static void linux_alsa_fill_sound_buffer(int16_t *samples,
-                                         int32_t sample_count) {
+                                         uint32_t sample_count) {
   if (pcm_handle) {
-    int32_t result = snd_pcm_writei(pcm_handle, samples, sample_count);
+    snd_pcm_sframes_t result =
+        snd_pcm_writei(pcm_handle, samples, sample_count);
     if (result == -EAGAIN) {
       // Just skip this frame
     } else if (result < 0) {
@@ -148,13 +151,13 @@ DEBUG_platform_read_entire_file(const char *filename) {
   if (fd > 0) {
     struct stat file_status;
     if (fstat(fd, &file_status) == 0) {
-      result.content_size = SAFE_TRUNCATE_U64(file_status.st_size);
+      result.content_size = SAFE_TRUNCATE_U64((uint64_t)file_status.st_size);
       result.content =
           mmap(NULL, result.content_size * sizeof(uint32_t),
                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (result.content) {
         if (read(fd, result.content, result.content_size) ==
-            result.content_size) {
+            (ssize_t)result.content_size) {
           // File read successfully
         } else {
           DEBUG_platform_free_file_memory(result);
@@ -182,7 +185,7 @@ static bool DEBUG_platform_write_entire_file(const char *filename,
   int fd =
       open(filename, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
   if (fd > 0) {
-    if (write(fd, content, size) == size) {
+    if (write(fd, content, size) == (ssize_t)size) {
       result = true;
     } else {
       // TODO: Log
@@ -230,7 +233,7 @@ int main() {
     }
     const GC gc = XCreateGC(display, window, 0, NULL);
 
-    linux_x11_resize_bitmap(display, screen, global_backbuffer, 800, 600);
+    linux_x11_resize_bitmap(global_backbuffer, 800, 600);
 
     libevdev *controller_evdev = NULL;
     int controller_found = -1;
@@ -267,21 +270,19 @@ int main() {
     }
 
     LinuxSoundOutput sound_output{
-        .samples_per_second = 48000,
-        .samples_per_write = 48000 / 15,
+        48000,
+        48000 / 15,
     };
 
-    linux_alsa_init(sound_output.samples_per_second,
-                    sound_output.samples_per_write);
+    linux_alsa_init((uint32_t)sound_output.samples_per_second,
+                    (uint32_t)sound_output.samples_per_write);
 
     // TODO: Pool with the bitmap image allocation
     int16_t *samples = static_cast<int16_t *>(
         mmap(NULL, sound_output.samples_per_write * CHANNELS * sizeof(int16_t),
              PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     GameMemory game_memory{
-        .is_initialized = false,
-        .permanent_storage_size = MEGABYTES(64),
-        .transient_storage_size = GIGABYTES(4),
+        false, MEGABYTES(64), NULL, GIGABYTES(1), NULL,
     };
 
 #if HANDMADE_INTERNAL
@@ -293,7 +294,7 @@ int main() {
     uint64_t total_size =
         game_memory.permanent_storage_size + game_memory.transient_storage_size;
     game_memory.permanent_storage =
-        mmap(address, total_size, PROT_READ | PROT_WRITE,
+        mmap(address, (size_t)total_size, PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     game_memory.transient_storage = (uint8_t *)game_memory.permanent_storage +
                                     game_memory.permanent_storage_size;
@@ -311,7 +312,7 @@ int main() {
 
       timespec last_counter;
       clock_gettime(CLOCK_MONOTONIC_RAW, &last_counter);
-      int64_t last_cycle_count = __rdtsc();
+      uint64_t last_cycle_count = __rdtsc();
 
       while (running) {
         while (XPending(display)) {
@@ -319,9 +320,9 @@ int main() {
           XNextEvent(display, &event);
           switch (event.type) {
           case ConfigureNotify: {
-            linux_x11_resize_bitmap(display, screen, global_backbuffer,
-                                    event.xconfigure.width,
-                                    event.xconfigure.height);
+            linux_x11_resize_bitmap(global_backbuffer,
+                                    (uint32_t)event.xconfigure.width,
+                                    (uint32_t)event.xconfigure.height);
           } break;
           case Expose: {
             const LinuxWindowDimension dimension =
@@ -414,11 +415,12 @@ int main() {
                   &input_event, &old_controller->right_shoulder, BTN_TR,
                   &new_controller->right_shoulder);
             } else if (input_event.type == EV_ABS) {
-              float x, y;
+              float x = old_controller->end_x;
+              float y = old_controller->end_y;
               new_controller->is_analog = true;
               switch (input_event.code) {
               case ABS_X: {
-                x = input_event.value - 128;
+                x = (float)(input_event.value - 128);
                 if (x < 0) {
                   x /= 128.0f;
                 } else {
@@ -426,7 +428,7 @@ int main() {
                 }
               } break;
               case ABS_Y: {
-                y = input_event.value - 128;
+                y = (float)(input_event.value - 128);
                 if (y < 0) {
                   y /= 128.0f;
                 } else {
@@ -444,15 +446,14 @@ int main() {
           }
         }
 
-        const GameOffscreenBuffer buffer{.memory = global_backbuffer.memory,
-                                         .width = global_backbuffer.width,
-                                         .height = global_backbuffer.height,
-                                         .pitch = global_backbuffer.pitch};
+        const GameOffscreenBuffer buffer{
+            global_backbuffer.memory, global_backbuffer.width,
+            global_backbuffer.height, global_backbuffer.pitch};
         const GameSoundOutputBuffer sound_buffer{
-            .samples_per_second = sound_output.samples_per_second,
-            .sample_count =
-                linux_alsa_get_samples_to_write(sound_output.samples_per_write),
-            .samples = samples};
+            sound_output.samples_per_second,
+            linux_alsa_get_samples_to_write(sound_output.samples_per_write),
+            samples,
+        };
         game_update_and_render(new_input, buffer, sound_buffer, game_memory);
 
         linux_alsa_fill_sound_buffer(sound_buffer.samples,
@@ -472,13 +473,13 @@ int main() {
         timespec end_counter;
         clock_gettime(CLOCK_MONOTONIC_RAW, &end_counter);
 
-        int64_t end_cycle_count = __rdtsc();
+        uint64_t end_cycle_count = __rdtsc();
 
         float cycles_elapsed =
             (float)(end_cycle_count - last_cycle_count) / (1000.0f * 1000.0f);
 
         float counter_elapsed =
-            ((end_counter.tv_sec - last_counter.tv_sec) * 1000) +
+            (float)((end_counter.tv_sec - last_counter.tv_sec) * 1000) +
             ((float)(end_counter.tv_nsec - last_counter.tv_nsec) /
              (1000.0f * 1000.0f));
         float fps = 1000.0f / (float)counter_elapsed;

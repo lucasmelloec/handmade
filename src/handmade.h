@@ -31,7 +31,7 @@ constexpr uint64_t TERABYTES(const uint64_t value) {
 
 static inline uint32_t SAFE_TRUNCATE_U64(uint64_t value) {
   ASSERT(value <= 0xffffffff);
-  uint32_t result = value;
+  uint32_t result = (uint32_t)value;
   return result;
 }
 
@@ -58,14 +58,14 @@ DEBUG_platform_free_file_memory(DEBUGReadFileResult &read_file_result);
 
 struct GameOffscreenBuffer {
   void *memory;
-  int32_t width;
-  int32_t height;
-  int32_t pitch;
+  uint32_t width;
+  uint32_t height;
+  uint32_t pitch;
 };
 
 struct GameSoundOutputBuffer {
-  int32_t samples_per_second;
-  int32_t sample_count;
+  uint32_t samples_per_second;
+  uint32_t sample_count;
   int16_t *samples;
 };
 

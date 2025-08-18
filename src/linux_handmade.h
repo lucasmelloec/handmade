@@ -6,19 +6,19 @@
 struct LinuxX11OffscreenBuffer {
   XImage image;
   void *memory;
-  int32_t memory_size;
-  int32_t width;
-  int32_t height;
-  int32_t pitch;
-  int32_t bytes_per_pixel;
+  uint32_t memory_size;
+  uint32_t width;
+  uint32_t height;
+  uint32_t pitch;
+  uint32_t bytes_per_pixel;
 };
 
 struct LinuxWindowDimension {
-  int32_t width;
-  int32_t height;
+  uint32_t width;
+  uint32_t height;
 };
 
 struct LinuxSoundOutput {
-  int32_t samples_per_second;
-  int32_t samples_per_write;
+  uint32_t samples_per_second;
+  uint32_t samples_per_write;
 };
