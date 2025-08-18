@@ -38,7 +38,7 @@ static void render_weird_gradient(const GameOffscreenBuffer &buffer,
   }
 }
 
-void game_update_and_render(const GameInput *input,
+void game_update_and_render(GameInput *input,
                             const GameOffscreenBuffer &buffer,
                             const GameSoundOutputBuffer &sound_buffer,
                             GameMemory &memory) {
@@ -48,7 +48,8 @@ void game_update_and_render(const GameInput *input,
     const char *filename = __FILE__;
     DEBUGReadFileResult file = DEBUG_platform_read_entire_file(filename);
     if (file.content) {
-      DEBUG_platform_write_entire_file("text.txt", file.content_size, file.content);
+      DEBUG_platform_write_entire_file("text.txt", file.content_size,
+                                       file.content);
       DEBUG_platform_free_file_memory(file);
     }
 
@@ -58,15 +59,22 @@ void game_update_and_render(const GameInput *input,
     memory.is_initialized = true;
   }
 
-  const GameControllerInput &input0 = input->controllers[0];
-  if (input0.is_analog) {
-    game_state->blue_offset += (int)(4.0f * input0.end_x);
-    game_state->frequency = 256 + (int)(128.0f * input0.end_y);
-  } else {
-  }
+  for (size_t i = 0; i < input->controllers.size(); ++i) {
+    const GameControllerInput *controller = get_controller(input, i);
+    if (controller->is_analog) {
+      game_state->blue_offset += (int)(4.0f * controller->stick_average_x);
+      game_state->frequency = 256 + (int)(128.0f * controller->stick_average_y);
+    } else {
+      if (controller->move_left.ended_down) {
+        game_state->blue_offset -= 1;
+      } else if (controller->move_right.ended_down) {
+        game_state->blue_offset += 1;
+      }
+    }
 
-  if (input0.down.ended_down) {
-    game_state->green_offset += 1;
+    if (controller->action_down.ended_down) {
+      game_state->green_offset += 1;
+    }
   }
 
   game_output_sound(sound_buffer, game_state->frequency);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -75,27 +76,22 @@ struct GameButtonState {
 };
 
 struct GameControllerInput {
+  bool is_connected;
   bool is_analog;
-
-  float start_x;
-  float start_y;
-
-  float min_x;
-  float min_y;
-
-  float max_x;
-  float max_y;
-
-  float end_x;
-  float end_y;
+  float stick_average_x;
+  float stick_average_y;
 
   union {
-    GameButtonState buttons[6];
+    std::array<GameButtonState, 10> buttons;
     struct {
-      GameButtonState up;
-      GameButtonState down;
-      GameButtonState left;
-      GameButtonState right;
+      GameButtonState move_up;
+      GameButtonState move_down;
+      GameButtonState move_left;
+      GameButtonState move_right;
+      GameButtonState action_up;
+      GameButtonState action_down;
+      GameButtonState action_left;
+      GameButtonState action_right;
       GameButtonState left_shoulder;
       GameButtonState right_shoulder;
     };
@@ -103,8 +99,14 @@ struct GameControllerInput {
 };
 
 struct GameInput {
-  GameControllerInput controllers[1];
+  std::array<GameControllerInput, 2> controllers;
 };
+static inline GameControllerInput *get_controller(GameInput *input,
+                                                  const size_t controller_index) {
+  ASSERT(controller_index < input->controllers.size());
+
+  return &input->controllers[controller_index];
+}
 
 struct GameMemory {
   bool is_initialized;

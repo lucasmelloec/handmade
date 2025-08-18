@@ -109,14 +109,36 @@ static void linux_x11_display_buffer_in_window(Display *const display,
             window_height);
 }
 
-static void linux_process_evdev_digital_button(input_event *input_event,
+static void linux_process_keyboard_message(GameButtonState *new_state,
+                                           bool is_down) {
+  ASSERT(new_state->ended_down != is_down);
+  new_state->ended_down = is_down;
+  ++new_state->half_transition_count;
+}
+
+static void linux_process_evdev_digital_button(input_event input_event,
                                                GameButtonState *old_state,
                                                int button_code,
                                                GameButtonState *new_state) {
   new_state->ended_down =
-      input_event->code == button_code && input_event->value == 1;
+      input_event.code == button_code && input_event.value == 1;
   new_state->half_transition_count =
       (old_state->ended_down != new_state->ended_down) ? 1 : 0;
+}
+
+static float linux_process_evdev_stick_value(int32_t value,
+                                             const int32_t deadzone) {
+  float result = 0.0f;
+  if (value < 128 - deadzone || value > 128 + deadzone) {
+    result = (float)(value - 128);
+    if (result < 0) {
+      result /= 128.0f;
+    } else {
+      result /= 127.0f;
+    }
+  }
+
+  return result;
 }
 
 static uint32_t linux_alsa_get_samples_to_write(uint32_t sample_count) {
@@ -202,6 +224,99 @@ static void
 DEBUG_platform_free_file_memory(DEBUGReadFileResult &read_file_result) {
   munmap(read_file_result.content, read_file_result.content_size);
   read_file_result.content = NULL;
+}
+
+void linux_x11_process_pending_messages(
+    Display *const display, const Window window, const GC gc,
+    GameControllerInput *keyboard_controller) {
+  while (XPending(display)) {
+    XEvent event;
+    XNextEvent(display, &event);
+    switch (event.type) {
+    case ConfigureNotify: {
+      linux_x11_resize_bitmap(global_backbuffer,
+                              (uint32_t)event.xconfigure.width,
+                              (uint32_t)event.xconfigure.height);
+    } break;
+    case Expose: {
+      const LinuxWindowDimension dimension =
+          linux_x11_get_window_dimension(display, window);
+      linux_x11_display_buffer_in_window(display, window, gc, global_backbuffer,
+                                         dimension.width, dimension.height);
+    } break;
+    case ClientMessage: {
+      running = false;
+    } break;
+    case DestroyNotify: {
+      running = false;
+    } break;
+    case KeyPress:
+    case KeyRelease: {
+      const bool just_released = event.xkey.type == KeyRelease;
+      bool is_down = event.xkey.type == KeyPress;
+      if (event.xkey.type == KeyRelease && XPending(display)) {
+        XEvent next_event;
+        XPeekEvent(display, &next_event);
+        if (next_event.xkey.type == KeyPress &&
+            next_event.xkey.time == event.xkey.time &&
+            next_event.xkey.keycode == event.xkey.keycode) {
+          XNextEvent(display, &next_event);
+          is_down = true;
+        }
+      }
+      if (is_down != just_released) {
+        switch (XLookupKeysym(&event.xkey, 0)) {
+        case 'w': {
+          linux_process_keyboard_message(&keyboard_controller->move_up,
+                                         is_down);
+        } break;
+        case 'a': {
+          linux_process_keyboard_message(&keyboard_controller->move_left,
+                                         is_down);
+        } break;
+        case 's': {
+          linux_process_keyboard_message(&keyboard_controller->move_down,
+                                         is_down);
+        } break;
+        case 'd': {
+          linux_process_keyboard_message(&keyboard_controller->move_right,
+                                         is_down);
+        } break;
+        case 'q': {
+          linux_process_keyboard_message(&keyboard_controller->left_shoulder,
+                                         is_down);
+        } break;
+        case 'e': {
+          linux_process_keyboard_message(&keyboard_controller->right_shoulder,
+                                         is_down);
+        } break;
+        case XK_Up: {
+          linux_process_keyboard_message(&keyboard_controller->action_up,
+                                         is_down);
+        } break;
+        case XK_Left: {
+          linux_process_keyboard_message(&keyboard_controller->action_left,
+                                         is_down);
+        } break;
+        case XK_Down: {
+          linux_process_keyboard_message(&keyboard_controller->action_down,
+                                         is_down);
+        } break;
+        case XK_Right: {
+          linux_process_keyboard_message(&keyboard_controller->action_right,
+                                         is_down);
+        } break;
+        case XK_Escape: {
+        } break;
+        case XK_space: {
+        } break;
+        }
+      }
+    } break;
+    default:
+      break;
+    }
+  }
 }
 
 int main() {
@@ -308,6 +423,9 @@ int main() {
       GameInput *new_input = &input[0];
       GameInput *old_input = &input[1];
 
+      bool dpad_x_active = false;
+      bool dpad_y_active = false;
+
       running = true;
 
       timespec last_counter;
@@ -315,81 +433,38 @@ int main() {
       uint64_t last_cycle_count = __rdtsc();
 
       while (running) {
-        while (XPending(display)) {
-          XEvent event;
-          XNextEvent(display, &event);
-          switch (event.type) {
-          case ConfigureNotify: {
-            linux_x11_resize_bitmap(global_backbuffer,
-                                    (uint32_t)event.xconfigure.width,
-                                    (uint32_t)event.xconfigure.height);
-          } break;
-          case Expose: {
-            const LinuxWindowDimension dimension =
-                linux_x11_get_window_dimension(display, window);
-            linux_x11_display_buffer_in_window(
-                display, window, gc, global_backbuffer, dimension.width,
-                dimension.height);
-          } break;
-          case ClientMessage: {
-            running = false;
-          } break;
-          case DestroyNotify: {
-            running = false;
-          } break;
-          case KeyPress:
-          case KeyRelease: {
-            const bool just_released = event.xkey.type == KeyRelease;
-            bool is_down = event.xkey.type == KeyPress;
-            if (event.xkey.type == KeyRelease && XPending(display)) {
-              XEvent next_event;
-              XPeekEvent(display, &next_event);
-              if (next_event.xkey.type == KeyPress &&
-                  next_event.xkey.time == event.xkey.time &&
-                  next_event.xkey.keycode == event.xkey.keycode) {
-                XNextEvent(display, &next_event);
-                is_down = true;
-              }
-            }
-            if (is_down != just_released) {
-              switch (XLookupKeysym(&event.xkey, 0)) {
-              case 'w': {
-                fprintf(stdout, "W\n");
-              } break;
-              case 'a': {
-                fprintf(stdout, "A\n");
-              } break;
-              case 's': {
-                fprintf(stdout, "S\n");
-              } break;
-              case 'd': {
-                fprintf(stdout, "D\n");
-              } break;
-              case 'q': {
-                fprintf(stdout, "Q\n");
-              } break;
-              case 'e': {
-                fprintf(stdout, "E\n");
-              } break;
-              case XK_Escape: {
-                fprintf(stdout, "Escape\n");
-              } break;
-              case XK_space: {
-                fprintf(stdout, "Space\n");
-              } break;
-              }
-            }
-          } break;
-          default:
-            break;
+        GameControllerInput *keyboard_controller = get_controller(new_input, 0);
+        *keyboard_controller = {};
+        keyboard_controller->is_connected = true;
+        for (uint32_t controller_index = 0;
+             controller_index < new_input->controllers.size();
+             ++controller_index) {
+          GameControllerInput *const new_controller =
+              get_controller(new_input, controller_index);
+          const GameControllerInput *const old_controller =
+              get_controller(old_input, controller_index);
+
+          for (uint32_t button_index = 0;
+               button_index < new_controller->buttons.size(); ++button_index) {
+            new_controller->buttons[button_index].ended_down =
+                old_controller->buttons[button_index].ended_down;
+            new_controller->stick_average_x = old_controller->stick_average_x;
+            new_controller->stick_average_y = old_controller->stick_average_y;
           }
         }
 
-        if (controller_found >= 0) {
-          input_event input_event;
+        linux_x11_process_pending_messages(display, window, gc,
+                                           keyboard_controller);
 
-          GameControllerInput *old_controller = &old_input->controllers[0];
-          GameControllerInput *new_controller = &new_input->controllers[0];
+        if (controller_found >= 0) {
+          constexpr uint32_t controller_index = 1; // 0 is the keyboard
+          input_event input_event;
+          GameControllerInput *old_controller =
+              get_controller(old_input, controller_index);
+          GameControllerInput *new_controller =
+              get_controller(new_input, controller_index);
+          new_controller->is_analog = true;
+          new_controller->is_connected = true;
           // TODO: Maybe use (rc == 1 || rc == 0 || rc == -EAGAIN) and check
           // if(rc == o) before using the event
           while (libevdev_next_event(controller_evdev,
@@ -397,53 +472,80 @@ int main() {
                                      &input_event) == 0) {
             if (input_event.type == EV_KEY) {
               linux_process_evdev_digital_button(
-                  &input_event, &old_controller->left, BTN_WEST,
-                  &new_controller->left);
+                  input_event, &old_controller->action_left, BTN_WEST,
+                  &new_controller->action_left);
               linux_process_evdev_digital_button(
-                  &input_event, &old_controller->right, BTN_EAST,
-                  &new_controller->right);
-              linux_process_evdev_digital_button(&input_event,
-                                                 &old_controller->up, BTN_NORTH,
-                                                 &new_controller->up);
+                  input_event, &old_controller->action_right, BTN_EAST,
+                  &new_controller->action_right);
               linux_process_evdev_digital_button(
-                  &input_event, &old_controller->down, BTN_SOUTH,
-                  &new_controller->down);
+                  input_event, &old_controller->action_up, BTN_NORTH,
+                  &new_controller->action_up);
               linux_process_evdev_digital_button(
-                  &input_event, &old_controller->left_shoulder, BTN_TL,
+                  input_event, &old_controller->action_down, BTN_SOUTH,
+                  &new_controller->action_down);
+              linux_process_evdev_digital_button(
+                  input_event, &old_controller->left_shoulder, BTN_TL,
                   &new_controller->left_shoulder);
               linux_process_evdev_digital_button(
-                  &input_event, &old_controller->right_shoulder, BTN_TR,
+                  input_event, &old_controller->right_shoulder, BTN_TR,
                   &new_controller->right_shoulder);
             } else if (input_event.type == EV_ABS) {
-              float x = old_controller->end_x;
-              float y = old_controller->end_y;
-              new_controller->is_analog = true;
+              constexpr int32_t DEADZONE = 3;
               switch (input_event.code) {
               case ABS_X: {
-                x = (float)(input_event.value - 128);
-                if (x < 0) {
-                  x /= 128.0f;
-                } else {
-                  x /= 127.0f;
+                if (!dpad_x_active) {
+                  new_controller->stick_average_x =
+                      linux_process_evdev_stick_value(input_event.value,
+                                                      DEADZONE);
                 }
+              } break;
+              case ABS_HAT0X: {
+                if (input_event.value == 0) {
+                  dpad_x_active = false;
+                } else {
+                  dpad_x_active = true;
+                }
+                new_controller->stick_average_x = (float)input_event.value;
               } break;
               case ABS_Y: {
-                y = (float)(input_event.value - 128);
-                if (y < 0) {
-                  y /= 128.0f;
-                } else {
-                  y /= 127.0f;
+                if (!dpad_y_active) {
+                  new_controller->stick_average_y =
+                      linux_process_evdev_stick_value(input_event.value,
+                                                      DEADZONE);
                 }
               } break;
+              case ABS_HAT0Y: {
+                if (input_event.value == 0) {
+                  dpad_y_active = false;
+                } else {
+                  dpad_y_active = true;
+                }
+                new_controller->stick_average_y = (float)input_event.value;
+              } break;
               }
-              new_controller->start_x = old_controller->start_x;
-              new_controller->start_y = old_controller->start_y;
-              new_controller->min_x = new_controller->max_x =
-                  new_controller->end_x = x;
-              new_controller->min_y = new_controller->max_y =
-                  new_controller->end_y = y;
             }
           }
+          constexpr float THRESHOLD = 0.5;
+          struct input_event fake_move_event = {
+              {}, 0, 0, (new_controller->stick_average_x < -THRESHOLD) ? 1 : 0};
+          linux_process_evdev_digital_button(fake_move_event,
+                                             &old_controller->move_left, 0,
+                                             &new_controller->move_left);
+          fake_move_event.value =
+              (new_controller->stick_average_x > THRESHOLD) ? 1 : 0;
+          linux_process_evdev_digital_button(fake_move_event,
+                                             &old_controller->move_right, 0,
+                                             &new_controller->move_right);
+          fake_move_event.value =
+              (new_controller->stick_average_y < -THRESHOLD) ? 1 : 0;
+          linux_process_evdev_digital_button(fake_move_event,
+                                             &old_controller->move_up, 0,
+                                             &new_controller->move_up);
+          fake_move_event.value =
+              (new_controller->stick_average_y > THRESHOLD) ? 1 : 0;
+          linux_process_evdev_digital_button(fake_move_event,
+                                             &old_controller->move_down, 0,
+                                             &new_controller->move_down);
         }
 
         const GameOffscreenBuffer buffer{
@@ -466,9 +568,6 @@ int main() {
                                            dimension.height);
 
         std::swap(old_input, new_input);
-        // NOTE: new_input needs to start equal to old_input because there isn't
-        // an evdev event every frame
-        *new_input = *old_input;
 
         timespec end_counter;
         clock_gettime(CLOCK_MONOTONIC_RAW, &end_counter);
@@ -483,7 +582,7 @@ int main() {
             ((float)(end_counter.tv_nsec - last_counter.tv_nsec) /
              (1000.0f * 1000.0f));
         float fps = 1000.0f / (float)counter_elapsed;
-        fprintf(stdout, "%.02f ms, %.02f FPS, %.02f Mcycles\n", counter_elapsed,
+        fprintf(stderr, "%.02f ms, %.02f FPS, %.02f Mcycles\n", counter_elapsed,
                 fps, cycles_elapsed);
 
         last_counter = end_counter;
