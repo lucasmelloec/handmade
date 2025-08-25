@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 #include <x86intrin.h>
 
 static constexpr uint32_t CHANNELS = 2;
@@ -319,6 +320,19 @@ void linux_x11_process_pending_messages(
   }
 }
 
+static timespec linux_get_wall_clock() {
+  timespec result;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &result);
+  return result;
+}
+
+static float linux_get_seconds_elapsed(timespec start, timespec end) {
+  float result =
+      (float)((end.tv_sec - start.tv_sec)) +
+      ((float)(end.tv_nsec - start.tv_nsec) / (1000.0f * 1000.0f * 1000.0f));
+  return result;
+}
+
 int main() {
   Display *const display = XOpenDisplay(NULL);
   if (display) {
@@ -340,6 +354,11 @@ int main() {
         // TODO: Log error
       }
     }
+
+    // TODO: Reliably query this on Linux
+    constexpr uint32_t monitor_refresh_hz = 60;
+    constexpr uint32_t game_update_hz = monitor_refresh_hz / 2;
+    constexpr float target_seconds_per_frame = 1.0f / (float)game_update_hz;
 
     if (XMapWindow(display, window) == 0) {
       // TODO: Log error
@@ -428,8 +447,7 @@ int main() {
 
       running = true;
 
-      timespec last_counter;
-      clock_gettime(CLOCK_MONOTONIC_RAW, &last_counter);
+      timespec last_counter = linux_get_wall_clock();
       uint64_t last_cycle_count = __rdtsc();
 
       while (running) {
@@ -567,28 +585,35 @@ int main() {
                                            global_backbuffer, dimension.width,
                                            dimension.height);
 
+        timespec work_counter = linux_get_wall_clock();
+
+        float work_seconds_elapsed =
+            linux_get_seconds_elapsed(last_counter, work_counter);
+
+        float seconds_elapsed_for_frame = work_seconds_elapsed;
+        if (seconds_elapsed_for_frame < target_seconds_per_frame) {
+          while (seconds_elapsed_for_frame < target_seconds_per_frame) {
+            uint32_t sleep_us = (uint32_t)(1000.0f * 1000.0f *
+                                           (target_seconds_per_frame -
+                                            seconds_elapsed_for_frame));
+            usleep(sleep_us);
+            seconds_elapsed_for_frame =
+                linux_get_seconds_elapsed(last_counter, linux_get_wall_clock());
+          }
+        } else {
+          // TODO: Log missed frame rate
+        }
+
         std::swap(old_input, new_input);
 
-        timespec end_counter;
-        clock_gettime(CLOCK_MONOTONIC_RAW, &end_counter);
-
         uint64_t end_cycle_count = __rdtsc();
-
-        float cycles_elapsed =
+        [[maybe_unused]] float cycles_elapsed =
             (float)(end_cycle_count - last_cycle_count) / (1000.0f * 1000.0f);
 
-        float counter_elapsed =
-            (float)((end_counter.tv_sec - last_counter.tv_sec) * 1000) +
-            ((float)(end_counter.tv_nsec - last_counter.tv_nsec) /
-             (1000.0f * 1000.0f));
-        float fps = 1000.0f / (float)counter_elapsed;
-        fprintf(stderr, "%.02f ms, %.02f FPS, %.02f Mcycles\n", counter_elapsed,
-                fps, cycles_elapsed);
-
+        timespec end_counter = linux_get_wall_clock();
         last_counter = end_counter;
-        last_cycle_count = end_cycle_count;
 
-        usleep(1000);
+        last_cycle_count = end_cycle_count;
       }
     } else {
       // TODO: log
